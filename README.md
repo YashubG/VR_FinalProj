@@ -107,3 +107,7 @@ Contrastive loss encourages:
 - 🔢 Similarity scores shown  
 
 ---
+
+## NOTES:
+Please download the best model and the last epoch's checkpoint from this sharepoint here(only visible to iiitb email accounts):
+https://iiitbac-my.sharepoint.com/:f:/g/personal/yashub_goel_iiitb_ac_in/IgBn1tcLyvBHSJ7mWOy1NdldAWhwERnLzkR6m9X_Ehk-F-k?e=cfRlBB
