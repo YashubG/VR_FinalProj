@@ -45,6 +45,21 @@ For each product (`item_id`):
 
 ---
 
+## 🗂️ Project Structure
+.
+├── Data/
+│   └── img/
+├── clip_train_final_v2.py
+├── evaluate_final.py
+├── visualisation.py
+├── splits.csv
+├── best_model.pth
+├── checkpoint.pth
+└── README.md
+
+
+---
+
 ## 🧠 Methodology
 
 ### 🔹 Model
