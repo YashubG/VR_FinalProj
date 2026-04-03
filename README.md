@@ -30,33 +30,18 @@ Given a query image, the system retrieves visually similar products from a galle
 
 ## 🗂️ Dataset
 
-- **Dataset Used:** DeepFashion (or your dataset name)
-- Total images: ~52,000+
+- **Dataset Used:** DeepFashion  
+- Total images: ~52,000+  
 - Each product has multiple views (front, side, back, etc.)
 
 ### 📌 Split Strategy (IMPORTANT)
 
 For each product (`item_id`):
 
-- 80% images → **Gallery**
-- 20% images → **Query**
+- 80% images → **Gallery**  
+- 20% images → **Query**  
 
 ✔ Ensures same product appears in both sets (required for retrieval)
-
----
-
-## 🗂️ Project Structure
-.
-├── Data/
-│   └── img/
-├── clip_train_final_v2.py
-├── evaluate_final.py
-├── visualisation.py
-├── splits.csv
-├── best_model.pth
-├── checkpoint.pth
-└── README.md
-
 
 ---
 
@@ -64,17 +49,17 @@ For each product (`item_id`):
 
 ### 🔹 Model
 
-- Pretrained: `openai/clip-vit-base-patch32`
-- Fine-tuned: Vision encoder only
+- Pretrained: `openai/clip-vit-base-patch32`  
+- Fine-tuned: Vision encoder only  
 
 ---
 
 ### 🔹 Training Strategy
 
-- Contrastive Learning
-- PK Sampling (multiple samples per product per batch)
-- Normalized embeddings
-- Cosine similarity for retrieval
+- Contrastive Learning  
+- PK Sampling (multiple samples per product per batch)  
+- Normalized embeddings  
+- Cosine similarity for retrieval  
 
 ---
 
@@ -90,7 +75,7 @@ Contrastive loss encourages:
 ## 📊 Evaluation Metrics
 
 | Metric | @5 | @10 | @15 |
-|------|----|----|----|
+|--------|----|-----|-----|
 | **Recall** | 0.947 | 0.967 | 0.976 |
 | **mAP** | 0.846 | 0.810 | 0.787 |
 | **NDCG** | 0.882 | 0.875 | 0.869 |
@@ -100,8 +85,21 @@ Contrastive loss encourages:
 ## 🖼️ Sample Results
 
 <p align="center">
-  <img src="assets/sample_result.png" width="800"/>
+  <img src="assets/Figure_1.png" width="800"/>
 </p>
+<p align="center">
+  <img src="assets/Figure_2.png" width="800"/>
+</p>
+<p align="center">
+  <img src="assets/Figure_3.png" width="800"/>
+</p>
+<p align="center">
+  <img src="assets/Figure_4.png" width="800"/>
+</p>
+<p align="center">
+  <img src="assets/Figure_5.png" width="800"/>
+</p>
+
 
 - 🔵 Query image on left  
 - 🟢 Green border = correct match  
@@ -109,11 +107,3 @@ Contrastive loss encourages:
 - 🔢 Similarity scores shown  
 
 ---
-
-## ⚙️ Installation
-
-```bash
-git clone https://github.com/your-username/your-repo.git
-cd your-repo
-
-pip install -r requirements.txt
