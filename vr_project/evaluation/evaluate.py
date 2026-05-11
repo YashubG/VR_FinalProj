@@ -128,7 +128,7 @@ def run_evaluation(
     all_results = []
 
     for qpath, qid in tqdm(query_records, desc=f"Evaluating [{tag}]"):
-        img_path = root / qpath
+        img_path = root / "Img/" / qpath
         if not img_path.exists():
             continue
 
