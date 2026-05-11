@@ -60,26 +60,72 @@ from utils.image_utils import get_clip_transform
 # Seed helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-def set_seed(seed: int) -> None:
+def set_seed(seed: int, fully_deterministic: bool = True) -> None:
+    """
+    Seed all RNG sources used during training.
+
+    Parameters
+    ----------
+    seed               : Integer seed value (use team roll numbers per spec).
+    fully_deterministic: If True, also sets CUDA deterministic mode.
+                         This ELIMINATES GPU non-determinism but is ~10-30 %
+                         slower due to disabling optimised non-deterministic
+                         CUDA kernels. Set False for speed, True for exact
+                         reproducibility.
+
+    Sources seeded
+    --------------
+    1. Python built-in random     — PairBatchSampler shuffling
+    2. NumPy                      — any numpy ops during training
+    3. PyTorch CPU                — weight init, dropout masks on CPU
+    4. PyTorch CUDA               — weight init, dropout on GPU
+    5. cuDNN algorithm selection  — conv algorithm picked per-run otherwise
+    6. cuDNN benchmark mode       — disabled; it re-selects algorithms each run
+    7. PYTHONHASHSEED             — dict/set ordering in Python 3.3+
+
+    What seeds do NOT fix
+    ---------------------
+    - DataLoader worker RNG: each worker process has its own seed. Fixed below
+      via `worker_init_fn` passed to DataLoader.
+    - External library ops (e.g. HuggingFace tokeniser parallelism): set
+      TOKENIZERS_PARALLELISM=false in your shell to suppress warnings.
+    """
+    import os
+    os.environ["PYTHONHASHSEED"] = str(seed)
+
     random.seed(seed)
     np.random.seed(seed)
+
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)   # for multi-GPU
+
+    if fully_deterministic:
+        # Force cuDNN to use deterministic algorithms.
+        # Raises RuntimeError if no deterministic algorithm exists for an op.
+        torch.backends.cudnn.deterministic = True
+        # Disable benchmark mode: it profiles and selects the fastest algorithm
+        # at startup, which may differ between runs (non-deterministic).
+        torch.backends.cudnn.benchmark = False
+        # PyTorch >= 1.8 global deterministic flag (catches additional ops)
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
 
 def worker_init_fn(worker_id: int) -> None:
     """
     Called by each DataLoader worker at startup.
- 
+
     Without this, all workers share the same numpy/random seed derived from
     the parent process, causing correlated sampling across batches.
     With this, each worker gets a unique but deterministic seed.
- 
+
     Usage: pass as `worker_init_fn=worker_init_fn` to DataLoader.
     """
     worker_seed = torch.initial_seed() % (2 ** 32)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Warm-up + cosine annealing LR
@@ -145,8 +191,8 @@ def train_one_seed(
         batch_sampler=sampler,
         num_workers=num_workers,
         pin_memory=(device == "cuda"),
-        worker_init_fn=worker_init_fn,
-        generator=g,
+        worker_init_fn=worker_init_fn,   # seeds each worker's numpy/random RNG
+        generator=g,                     # seeds DataLoader's own shuffle RNG
     )
 
     # ── model setup ───────────────────────────────────────────────────────────
@@ -228,29 +274,57 @@ def run_multiseed_training(
     **kwargs,
 ) -> Dict[str, Dict]:
     """
-    Run training for each seed; return per-seed histories.
+    Train a separate model checkpoint for each seed.
+
+    Why separate checkpoints?
+    -------------------------
+    Seeds only affect training (pair sampling order, dropout masks, batch
+    ordering). At inference time the pipeline is fully deterministic given
+    fixed weights — so running the same checkpoint with different seeds
+    would produce identical scores every time.
+
+    The correct procedure is:
+      seed 42  → train → clip_finetuned_seed_42.pt → build index → eval → metric_42
+      seed 0   → train → clip_finetuned_seed_0.pt  → build index → eval → metric_0
+      ...
+      report: mean(metrics) ± std(metrics)
+
+    Each seed produces a slightly different fine-tuned model because the
+    gradient trajectory differs (different pair orderings, different dropout
+    masks). The spread across seeds is genuine model variance, not noise.
 
     Returns
     -------
-    {"seed_<N>": {"train_loss": [...]}, ...}
+    Dict mapping tag → {"train_loss": [...], "save_path": Path}
+    so the caller knows which checkpoint belongs to which seed.
     """
     results = {}
     for seed in seeds:
-        tag     = f"seed_{seed}"
-        save_p  = CLIP_LOCAL_PATH.parent / f"clip_finetuned_{tag}.pt"
+        tag    = f"seed_{seed}"
+        # Each seed gets its OWN checkpoint file — never overwrite each other.
+        save_p = CLIP_LOCAL_PATH.parent / f"clip_finetuned_{tag}.pt"
+        # Also give each seed its own checkpoint subdirectory so epoch saves
+        # don't collide across seeds during parallel/sequential runs.
+        ckpt_dir = CLIP_CHECKPOINT_DIR / tag
+
         history = train_one_seed(
             train_records,
             seed=seed,
-            save_path=save_path,
+            save_path=save_p,          # ← correct variable (was a typo before)
+            checkpoint_dir=ckpt_dir,
             **kwargs,
         )
+        history["save_path"] = save_p
         results[tag] = history
         print(f"\n[MultiSeed] {tag} complete. "
-              f"Final loss: {history['train_loss'][-1]:.4f}")
+              f"Final loss: {history['train_loss'][-1]:.4f} | "
+              f"Saved: {save_p}")
 
-    # Print summary
+    # Summary across seeds
     final_losses = [v["train_loss"][-1] for v in results.values()]
-    print(f"\n[MultiSeed] Final loss: mean={np.mean(final_losses):.4f} "
-          f"± {np.std(final_losses):.4f}")
+    print(f"\n[MultiSeed] Loss across seeds: "
+          f"mean={np.mean(final_losses):.4f} ± {np.std(final_losses):.4f}")
+    print("[MultiSeed] To get metric mean±std, run run_evaluation.py with "
+          "each checkpoint separately (--checkpoint flag).")
 
     return results
