@@ -66,6 +66,13 @@ def parse_args():
                    help="Output JSON path (default: results/<tag>_metrics.json)")
     p.add_argument("--finetuned",  action="store_true",
                    help="Load fine-tuned CLIP checkpoint")
+    p.add_argument("--checkpoint", type=Path, default=None,
+                   help="Explicit path to a .pt CLIP checkpoint (e.g. "
+                        "models/clip_finetuned_seed_42.pt). Overrides --finetuned.")
+    p.add_argument("--multiseed-eval", action="store_true",
+                   help="Evaluate all per-seed checkpoints and report mean±std.")
+    p.add_argument("--rebuild-index", action="store_true",
+                   help="Rebuild HNSW index per seed during --multiseed-eval.")
     return p.parse_args()
 
 
@@ -173,8 +180,25 @@ def main():
     from evaluation.evaluate import run_evaluation
 
     detector  = YOLODetector()
-    clip_enc  = CLIPEncoder(alpha=args.alpha)
     captioner = None if args.no_rerank else BLIP2Captioner()
+
+    # ── Multi-seed evaluation mode ────────────────────────────────────────────
+    if getattr(args, "multiseed_eval", False):
+        _run_multiseed_eval(
+            args, query_records, gallery_records, root,
+            detector, captioner,
+        )
+        return
+
+    # ── Single checkpoint ─────────────────────────────────────────────────────
+    # --checkpoint overrides --finetuned: lets you point at any specific .pt file,
+    # e.g. models/clip_finetuned_seed_42.pt produced by run_finetune.py --multiseed
+    if args.checkpoint:
+        from models.clip_encoder import CLIPEncoder, load_clip_weights
+        clip_enc = CLIPEncoder(alpha=args.alpha,
+                               local_finetuned_path=args.checkpoint)
+    else:
+        clip_enc = CLIPEncoder(alpha=args.alpha)
 
     # ── Load index ────────────────────────────────────────────────────────────
     tag       = args.index_tag
@@ -211,6 +235,104 @@ def main():
     with open(str(out_path), "w") as f:
         json.dump(metrics, f, indent=2)
     print(f"\n[Eval] Metrics saved to {out_path}")
+
+
+def _run_multiseed_eval(args, query_records, gallery_records, root,
+                        detector, captioner):
+    """
+    Evaluate every per-seed checkpoint in models/ and report mean ± std.
+
+    Each seed produced a different fine-tuned model via run_finetune.py
+    --multiseed. Inference is deterministic per checkpoint — the variation
+    across seeds comes entirely from the different training trajectories,
+    not from any randomness at eval time.
+
+    If --rebuild-index is set, a fresh HNSW index is built from each seed's
+    checkpoint (necessary for Ablation C where the gallery embeddings themselves
+    change with the model). If not set, the existing index is reused (valid
+    for Ablation B where CLIP is frozen and embeddings are identical).
+    """
+    from models.clip_encoder import CLIPEncoder
+    from scripts.index_builder import HNSWIndex
+    from scripts.offline_indexing import build_index
+    from evaluation.evaluate import run_evaluation
+    from evaluation.metrics import format_metrics
+    from config import MODELS_DIR
+    import glob, numpy as np
+
+    # Find all per-seed checkpoints
+    pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
+    ckpt_files = sorted(glob.glob(pattern))
+    if not ckpt_files:
+        print(f"ERROR: No per-seed checkpoints found matching {pattern}")
+        print("Run: python run_finetune.py --multiseed")
+        sys.exit(1)
+
+    print(f"[MultiSeedEval] Found {len(ckpt_files)} checkpoints: "
+          f"{[Path(c).name for c in ckpt_files]}")
+
+    all_metrics = {}
+    for ckpt_path in ckpt_files:
+        seed_tag = Path(ckpt_path).stem.replace("clip_finetuned_", "")
+        print(f"\n{'='*55}")
+        print(f"  Evaluating {seed_tag}")
+        print("="*55)
+
+        clip_enc = CLIPEncoder(alpha=args.alpha,
+                               local_finetuned_path=Path(ckpt_path))
+
+        if getattr(args, "rebuild_index", False):
+            # Build a fresh index using this seed's embeddings
+            idx_tag = f"{args.index_tag}_{seed_tag}"
+            print(f"  Building index for {seed_tag} ...")
+            index = build_index(
+                gallery_records, root=root, alpha=args.alpha,
+                use_blip2=not args.no_rerank, tag=idx_tag,
+                detector=detector, clip_enc=clip_enc,
+                captioner=captioner if not args.no_rerank else None,
+            )
+        else:
+            idx_tag   = args.index_tag
+            idx_path  = EMBEDDINGS_DIR / f"{idx_tag}_hnsw.bin"
+            meta_path = EMBEDDINGS_DIR / f"{idx_tag}_metadata.pkl"
+            index = HNSWIndex.load(idx_path, meta_path)
+            if index is None:
+                print(f"  ERROR: Index not found. Use --rebuild-index.")
+                sys.exit(1)
+
+        metrics = run_evaluation(
+            query_records   = query_records,
+            gallery_records = gallery_records,
+            root            = root,
+            index           = index,
+            clip_enc        = clip_enc,
+            detector        = detector,
+            captioner       = captioner if not args.no_rerank else None,
+            top_k_values    = args.top_k,
+            use_reranking   = not args.no_rerank,
+            tag             = seed_tag,
+        )
+        all_metrics[seed_tag] = metrics
+        print(format_metrics(metrics, args.top_k))
+
+    # Aggregate mean ± std across seeds
+    print("\n" + "="*55)
+    print("  AGGREGATE (mean ± std across seeds)")
+    print("="*55)
+
+    agg = {}
+    metric_keys = [k for k in list(all_metrics.values())[0]
+                   if not k.endswith("_std") and k != "num_queries"]
+    for k in metric_keys:
+        vals = [all_metrics[s][k] for s in all_metrics]
+        agg[k]              = float(np.mean(vals))
+        agg[f"{k}_std"]     = float(np.std(vals))
+        print(f"  {k:<15} {agg[k]:.4f} ± {agg[f'{k}_std']:.4f}")
+
+    out_path = args.out or RESULTS_DIR / f"{args.index_tag}_multiseed_metrics.json"
+    with open(str(out_path), "w") as f:
+        json.dump({"per_seed": all_metrics, "aggregate": agg}, f, indent=2)
+    print(f"\n[MultiSeedEval] Saved to {out_path}")
 
 
 if __name__ == "__main__":
