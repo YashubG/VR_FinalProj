@@ -67,6 +67,19 @@ def set_seed(seed: int) -> None:
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+def worker_init_fn(worker_id: int) -> None:
+    """
+    Called by each DataLoader worker at startup.
+ 
+    Without this, all workers share the same numpy/random seed derived from
+    the parent process, causing correlated sampling across batches.
+    With this, each worker gets a unique but deterministic seed.
+ 
+    Usage: pass as `worker_init_fn=worker_init_fn` to DataLoader.
+    """
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Warm-up + cosine annealing LR
@@ -123,11 +136,17 @@ def train_one_seed(
         train_records, root=root, transform=transform, mode="train"
     )
     sampler   = PairBatchSampler(dataset, batch_size=batch_size, drop_last=True)
+    # generator: pins the DataLoader's internal shuffle RNG to the seed so
+    # the sequence of batches is identical across runs with the same seed.
+    g = torch.Generator()
+    g.manual_seed(seed)
     loader    = torch.utils.data.DataLoader(
         dataset,
         batch_sampler=sampler,
         num_workers=num_workers,
         pin_memory=(device == "cuda"),
+        worker_init_fn=worker_init_fn,
+        generator=g,
     )
 
     # ── model setup ───────────────────────────────────────────────────────────
