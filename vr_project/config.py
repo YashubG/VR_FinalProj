@@ -63,7 +63,7 @@ ALPHA                  = 0.6      # image weight; (1-ALPHA) is text weight
 # ─────────────────────────────────────────────
 # Training
 # ─────────────────────────────────────────────
-BATCH_SIZE             = 32
+BATCH_SIZE             = 8
 NUM_EPOCHS             = 10
 LEARNING_RATE          = 1e-5
 WEIGHT_DECAY           = 1e-4

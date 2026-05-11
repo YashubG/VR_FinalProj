@@ -1,0 +1,8 @@
+__pycache__/
+deepfashion/
+Anno*
+*.pt
+yolo/
+blip2/
+*.bin
+*.pkl
