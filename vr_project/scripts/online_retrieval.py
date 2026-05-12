@@ -35,7 +35,7 @@ from PIL import Image
 
 from config import DEFAULT_TOP_K, DATASET_DIR, DEVICE
 from models.detector import YOLODetector
-from models.captioner import BLIP2Captioner
+from models.captioner import BLIP2ITM
 from models.clip_encoder import CLIPEncoder
 from scripts.index_builder import HNSWIndex
 from utils.image_utils import load_image
@@ -50,7 +50,7 @@ def retrieve(
     index:        HNSWIndex,
     clip_enc:     CLIPEncoder,
     detector:     YOLODetector,
-    captioner:    Optional[BLIP2Captioner] = None,
+    itm_scorer:   Optional[BLIP2ITM] = None,
     top_k:        int   = DEFAULT_TOP_K,
     rerank_top_k: int   = 50,       # number of candidates to re-rank
     beta:         float = 0.5,      # cosine vs ITM blend (1.0 = no ITM)
@@ -65,7 +65,7 @@ def retrieve(
     index        : Loaded HNSW index.
     clip_enc     : Loaded CLIPEncoder.
     detector     : Loaded YOLODetector.
-    captioner    : Loaded BLIP2Captioner (None → skip re-ranking).
+    itm_scorer   : Loaded BLIP2ITM (None → skip re-ranking).
     top_k        : Number of results to return to the user.
     rerank_top_k : Retrieve this many candidates before re-ranking.
     beta         : Weight for cosine score in blended final score.
@@ -83,15 +83,15 @@ def retrieve(
     query_emb = clip_enc.encode_image(cropped)        # (D,) normalised
 
     # Step 3: ANN retrieval
-    fetch_k = rerank_top_k if (use_reranking and captioner) else top_k
+    fetch_k = rerank_top_k if (use_reranking and itm_scorer) else top_k
     candidates = index.search(query_emb, top_k=fetch_k)
 
-    if not use_reranking or captioner is None or not candidates:
+    if not use_reranking or itm_scorer is None or not candidates:
         return candidates[:top_k]
 
     # Step 4: BLIP-2 ITM re-ranking
-    captions = [c["caption"] for c in candidates]
-    itm_scores = captioner.itm_scores_batch(cropped, captions)
+    captions   = [c["caption"] for c in candidates]
+    itm_scores = itm_scorer.itm_scores_batch(cropped, captions)
 
     for cand, itm in zip(candidates, itm_scores):
         cosine = cand["score"]
@@ -152,9 +152,9 @@ class RetrievalPipeline:
         from config import HNSW_INDEX_PATH, HNSW_METADATA_PATH
 
         print("[Pipeline] Loading models ...")
-        self.detector  = YOLODetector(device=device)
-        self.clip_enc  = CLIPEncoder(alpha=alpha, device=device)
-        self.captioner = BLIP2Captioner(device=device) if use_reranking else None
+        self.detector   = YOLODetector(device=device)
+        self.clip_enc   = CLIPEncoder(alpha=alpha, device=device)
+        self.itm_scorer = BLIP2ITM(device=device) if use_reranking else None
         self.use_reranking = use_reranking
         self.beta      = beta
 
@@ -180,14 +180,14 @@ class RetrievalPipeline:
         Returns (results_list, cropped_query_image).
         """
         results = retrieve(
-            query_img    = img,
-            index        = self.index,
-            clip_enc     = self.clip_enc,
-            detector     = self.detector,
-            captioner    = self.captioner,
-            top_k        = top_k,
-            use_reranking= self.use_reranking,
-            beta         = self.beta,
+            query_img     = img,
+            index         = self.index,
+            clip_enc      = self.clip_enc,
+            detector      = self.detector,
+            itm_scorer    = self.itm_scorer,
+            top_k         = top_k,
+            use_reranking = self.use_reranking,
+            beta          = self.beta,
         )
         # Get the cropped image separately for display
         cropped, _ = self.detector.crop_product(img)

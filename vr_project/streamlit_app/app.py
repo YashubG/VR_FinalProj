@@ -199,11 +199,11 @@ def load_clip(alpha: float):
     return CLIPEncoder(alpha=alpha)
 
 
-@st.cache_resource(show_spinner="Loading BLIP-2 captioner...")
-def load_captioner():
-    from models.captioner import BLIP2Captioner
+@st.cache_resource(show_spinner="Loading BLIP-2 ITM scorer...")
+def load_itm_scorer():
+    from models.captioner import BLIP2ITM
 
-    return BLIP2Captioner()
+    return BLIP2ITM()
 
 
 @st.cache_resource(show_spinner="Loading HNSW index...")
@@ -516,12 +516,12 @@ with st.container(border=True):
         candidates = index.search(query_emb, top_k=rerank_k if use_rerank else top_k)
 
     if use_rerank and candidates:
-        with st.spinner("BLIP-2 reranking..."):
-            captioner = load_captioner()
-            captions = [c["caption"] for c in candidates]
-            itm_scores = captioner.itm_scores_batch(final_crop, captions)
+        with st.spinner("BLIP-2 ITM reranking..."):
+            itm_scorer = load_itm_scorer()
+            captions   = [c["caption"] for c in candidates]
+            itm_scores = itm_scorer.itm_scores_batch(final_crop, captions)
             for cand, itm in zip(candidates, itm_scores):
-                cand["itm_score"] = itm
+                cand["itm_score"]   = itm
                 cand["final_score"] = 0.5 * cand["score"] + 0.5 * itm
             candidates.sort(key=lambda x: x["final_score"], reverse=True)
             candidates = candidates[:top_k]

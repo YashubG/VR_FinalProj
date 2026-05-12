@@ -47,7 +47,7 @@ from data.dataset import (
     SPLIT_DIR,
 )
 from models.detector import YOLODetector
-from models.captioner import BLIP2Captioner
+from models.captioner import BLIP2Captioner, BLIP2ITM
 from models.clip_encoder import CLIPEncoder
 from scripts.index_builder import HNSWIndex
 from scripts.offline_indexing import build_index, load_gallery_embeddings
@@ -99,6 +99,7 @@ def run_evaluation(
     clip_enc:        CLIPEncoder,
     detector:        YOLODetector,
     captioner:       Optional[BLIP2Captioner] = None,
+    itm_scorer:      Optional[BLIP2ITM]       = None,
     top_k_values:    List[int]                = TOP_K_VALUES,
     use_reranking:   bool                     = False,
     beta:            float                    = 0.5,
@@ -144,11 +145,11 @@ def run_evaluation(
             index         = index,
             clip_enc      = clip_enc,
             detector      = detector,
-            captioner     = captioner if use_reranking else None,
+            itm_scorer    = itm_scorer if use_reranking else None,
             top_k         = max_k,
             rerank_top_k  = max_k * 5,
             beta          = beta,
-            use_reranking = use_reranking and (captioner is not None),
+            use_reranking = use_reranking and (itm_scorer is not None),
         )
 
         # Retrieved item_ids in ranked order
@@ -219,7 +220,8 @@ def run_ablation_study(
     print(format_metrics(metrics_a))
 
     # ── Condition B: frozen CLIP + BLIP-2, two α values ───────────────────────
-    captioner = BLIP2Captioner()
+    captioner  = BLIP2Captioner()
+    itm_scorer = BLIP2ITM()
 
     for alpha in alpha_values:
         print(f"\n{'='*60}")
@@ -234,8 +236,8 @@ def run_ablation_study(
         )
         metrics_b = run_evaluation(
             query_records, gallery_records, root,
-            index_b, clip_enc_b, detector, captioner,
-            use_reranking=True, tag=f"B_a{alpha}",
+            index_b, clip_enc_b, detector,
+            itm_scorer=itm_scorer, use_reranking=True, tag=f"B_a{alpha}",
         )
         key = f"B_alpha{alpha}"
         all_results[key] = metrics_b
@@ -259,8 +261,8 @@ def run_ablation_study(
         )
         metrics_c = run_evaluation(
             query_records, gallery_records, root,
-            index_c, clip_enc_c, detector, captioner,
-            use_reranking=True, tag=f"C_a{alpha}",
+            index_c, clip_enc_c, detector,
+            itm_scorer=itm_scorer, use_reranking=True, tag=f"C_a{alpha}",
         )
         key = f"C_alpha{alpha}"
         all_results[key] = metrics_c

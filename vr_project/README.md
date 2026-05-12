@@ -1,7 +1,7 @@
 # Visual Product Search Engine
 
 A query-by-image fashion retrieval system built on **YOLO + BLIP-2 + CLIP + HNSW**.  
-Built for the *Visual Recognition Course Project* on the **DeepFashion In-Shop Clothes Retrieval** dataset.
+Built for the _Visual Recognition Course Project_ on the **DeepFashion In-Shop Clothes Retrieval** dataset.
 
 ---
 
@@ -40,11 +40,11 @@ OFFLINE INDEXING
 Catalogue image
      │
      ▼
-┌──────────┐    ┌──────────────┐    ┌────────────────────────────────┐
+┌──────────┐    ┌──────────────┐     ┌────────────────────────────────┐
 │  YOLO    │───▶│   BLIP-2     │───▶│  CLIP fusion                   │
-│ (detect) │    │  (caption)   │    │  v = α·φ_V(x̂) + (1-α)·φ_T(c) │
-│          │    │              │    │  ‖v‖ = 1                        │
-└──────────┘    └──────────────┘    └─────────────┬──────────────────┘
+│ (detect) │    │  (caption)   │     │  v = α·φ_V(x̂) + (1-α)·φ_T(c)   |
+│          │    │              │     │  ‖v‖ = 1                       │
+└──────────┘    └──────────────┘     └─────────────┬──────────────────┘
                                                    │
                                                    ▼
                                           ┌──────────────────┐
@@ -64,6 +64,7 @@ Query image ──▶ YOLO crop ──▶ CLIP encode ──▶ HNSW search ─�
 ### 1. Why `open_clip` instead of OpenAI's `clip` package?
 
 `open_clip` (https://github.com/mlfoundations/open_clip) is a community re-implementation of CLIP that:
+
 - Exposes native PyTorch training (no monkey-patching required).
 - Supports `model.save_pretrained()` / `model.load_pretrained()` patterns.
 - Provides more pretrained weight variants (ViT-L, ViT-H, etc.) under the same API.
@@ -129,11 +130,11 @@ Query image ──▶ YOLO crop ──▶ CLIP encode ──▶ HNSW search ─�
 
 ### 12. Ablation study design
 
-| ID | Config | Purpose |
-|----|--------|---------|
-| A  | α=1.0, vision-only CLIP, frozen | Baseline: no text alignment, no fine-tuning |
-| B  | α∈{0.6, 0.8}, frozen CLIP + BLIP-2 | Measures captioning gain without fine-tuning |
-| C  | α∈{0.6, 0.8}, fine-tuned CLIP + BLIP-2 | Isolates fine-tuning contribution |
+| ID  | Config                                 | Purpose                                      |
+| --- | -------------------------------------- | -------------------------------------------- |
+| A   | α=1.0, vision-only CLIP, frozen        | Baseline: no text alignment, no fine-tuning  |
+| B   | α∈{0.6, 0.8}, frozen CLIP + BLIP-2     | Measures captioning gain without fine-tuning |
+| C   | α∈{0.6, 0.8}, fine-tuned CLIP + BLIP-2 | Isolates fine-tuning contribution            |
 
 All conditions use the same HNSW configuration. Results are reported as mean ± std over 3–4 random seeds.
 
@@ -248,6 +249,7 @@ The code reads the official partition file automatically when `--split official`
 ### Option B: Custom Dataset
 
 Organise images with item-level subdirectories:
+
 ```
 data/custom_dataset/
 ├── item_001/
@@ -259,6 +261,7 @@ data/custom_dataset/
 ```
 
 Then run:
+
 ```bash
 python run_indexing.py --root data/custom_dataset --split scan --tag custom
 ```
@@ -266,6 +269,7 @@ python run_indexing.py --root data/custom_dataset --split scan --tag custom
 ### Option C: Pre-built split files
 
 Create `data/splits/train.txt`, `gallery.txt`, `query.txt` with format:
+
 ```
 relative/path/to/image.jpg  item_id
 ```
@@ -320,6 +324,7 @@ streamlit run streamlit_app/app.py
 ```
 
 **UI flow:**
+
 1. Upload any clothing image.
 2. YOLO crops the product region (multiple detections shown for selection).
 3. User confirms or selects a different crop.
@@ -328,6 +333,7 @@ streamlit run streamlit_app/app.py
 6. Results displayed as a grid with scores, item IDs, and captions.
 
 **Sidebar controls:**
+
 - Index tag (must match what was built)
 - Fusion α weight
 - Top-K slider
@@ -340,11 +346,11 @@ streamlit run streamlit_app/app.py
 
 Metrics computed (per spec):
 
-| Metric | Description |
-|--------|-------------|
-| **Recall@K** | ≥1 relevant item in top-K (binary: 0 or 1 per query) |
-| **NDCG@K** | Normalised DCG — rewards placing relevant items earlier |
-| **mAP@K** | Mean Average Precision — rewards both finding and ranking |
+| Metric       | Description                                               |
+| ------------ | --------------------------------------------------------- |
+| **Recall@K** | ≥1 relevant item in top-K (binary: 0 or 1 per query)      |
+| **NDCG@K**   | Normalised DCG — rewards placing relevant items earlier   |
+| **mAP@K**    | Mean Average Precision — rewards both finding and ranking |
 
 K ∈ {5, 10, 15} as specified.  
 Results reported as **mean ± std** over 3–4 random seeds.
@@ -356,6 +362,7 @@ Ground truth: two images are a correct match iff they share the same `item_id`.
 ## Ablation Study
 
 Run all three conditions automatically:
+
 ```python
 from evaluation.evaluate import run_ablation_study
 from data.dataset import parse_official_splits
@@ -380,16 +387,19 @@ Results saved to `results/ablation_results.json`.
 Every model in the system supports **local caching** to avoid repeated downloads:
 
 ### YOLO
+
 - **First run**: ultralytics auto-downloads `yolov8n.pt` and saves to `models/yolo/yolov8n.pt`.
 - **Subsequent runs**: loaded from disk, no internet required.
 - **Change model**: edit `YOLO_MODEL_NAME` in `config.py` (e.g., `"yolov8s.pt"` for higher accuracy).
 
 ### CLIP
+
 - **First run**: `open_clip` downloads `ViT-B/32` (OpenAI weights) and saves to `models/clip_base.pt`.
 - **After fine-tuning**: fine-tuned weights are saved to `models/clip_finetuned.pt` and loaded automatically on next run.
 - **Epoch checkpoints**: saved to `models/clip_checkpoints/clip_epoch_NNN.pt` for recovery.
 
 ### BLIP-2
+
 - **First run**: HuggingFace downloads `Salesforce/blip2-opt-2.7b` (~15 GB) and saves to `models/blip2/`.
 - **Subsequent runs**: loaded from `models/blip2/` directory (no internet).
 - **8-bit quantisation**: set `load_in_8bit=True` in `BLIP2Captioner(...)` to reduce GPU memory from ~16 GB to ~4 GB.
@@ -397,6 +407,7 @@ Every model in the system supports **local caching** to avoid repeated downloads
 ### Forcing local-only mode
 
 Set environment variable to prevent HuggingFace from going online:
+
 ```bash
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -408,23 +419,23 @@ export HF_DATASETS_OFFLINE=1
 
 All settings are in `config.py`. Key parameters:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `ALPHA` | 0.6 | Image weight in fusion (1.0 = vision only) |
-| `CLIP_MODEL_NAME` | `"ViT-B/32"` | CLIP architecture |
-| `CLIP_PRETRAINED` | `"openai"` | CLIP weight set |
-| `BLIP2_MODEL_NAME` | `"Salesforce/blip2-opt-2.7b"` | HuggingFace model ID |
-| `YOLO_MODEL_NAME` | `"yolov8n.pt"` | YOLO variant |
-| `HNSW_M` | 32 | HNSW graph connections per node |
-| `HNSW_EF_CONSTRUCTION` | 200 | Index build quality |
-| `HNSW_EF_SEARCH` | 100 | Query-time exploration |
-| `BATCH_SIZE` | 32 | Training batch size (pairs) |
-| `NUM_EPOCHS` | 10 | Fine-tuning epochs |
-| `LEARNING_RATE` | 1e-5 | AdamW learning rate |
-| `TEMPERATURE` | 0.07 | InfoNCE temperature |
-| `TRAIN_LAST_N_BLOCKS` | 4 | Vision blocks to unfreeze |
-| `TOP_K_VALUES` | [5,10,15] | Evaluation cutoffs |
-| `SEEDS` | [42,0,7,21] | Random seeds for multi-seed runs |
+| Parameter              | Default                       | Description                                |
+| ---------------------- | ----------------------------- | ------------------------------------------ |
+| `ALPHA`                | 0.6                           | Image weight in fusion (1.0 = vision only) |
+| `CLIP_MODEL_NAME`      | `"ViT-B/32"`                  | CLIP architecture                          |
+| `CLIP_PRETRAINED`      | `"openai"`                    | CLIP weight set                            |
+| `BLIP2_MODEL_NAME`     | `"Salesforce/blip2-opt-2.7b"` | HuggingFace model ID                       |
+| `YOLO_MODEL_NAME`      | `"yolov8n.pt"`                | YOLO variant                               |
+| `HNSW_M`               | 32                            | HNSW graph connections per node            |
+| `HNSW_EF_CONSTRUCTION` | 200                           | Index build quality                        |
+| `HNSW_EF_SEARCH`       | 100                           | Query-time exploration                     |
+| `BATCH_SIZE`           | 32                            | Training batch size (pairs)                |
+| `NUM_EPOCHS`           | 10                            | Fine-tuning epochs                         |
+| `LEARNING_RATE`        | 1e-5                          | AdamW learning rate                        |
+| `TEMPERATURE`          | 0.07                          | InfoNCE temperature                        |
+| `TRAIN_LAST_N_BLOCKS`  | 4                             | Vision blocks to unfreeze                  |
+| `TOP_K_VALUES`         | [5,10,15]                     | Evaluation cutoffs                         |
+| `SEEDS`                | [42,0,7,21]                   | Random seeds for multi-seed runs           |
 
 ---
 
