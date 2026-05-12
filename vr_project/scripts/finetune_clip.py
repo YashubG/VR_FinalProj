@@ -215,8 +215,10 @@ def train_one_seed(
         lr_lambda=lambda s: _warmup_cosine_lambda(s, warmup_steps, total_steps),
     )
 
-    history: List[float] = []
+    history:    List[float] = []
     global_step = 0
+    best_loss   = float("inf")
+    best_epoch  = -1
 
     for epoch in range(1, epochs + 1):
         epoch_losses = []
@@ -251,15 +253,28 @@ def train_one_seed(
         history.append(avg_loss)
         elapsed  = time.time() - t0
 
-        print(f"  Epoch {epoch:03d}/{epochs} | loss={avg_loss:.4f} | "
-              f"lr={scheduler.get_last_lr()[0]:.2e} | {elapsed:.1f}s")
-
+        # Per-epoch checkpoint (for resume / inspection)
         save_clip_checkpoint(clip_enc._model, epoch, checkpoint_dir)
 
-    # ── save best (final epoch) model ─────────────────────────────────────────
+        # Overwrite best model only when loss genuinely improves
+        if avg_loss < best_loss:
+            best_loss  = avg_loss
+            best_epoch = epoch
+            clip_enc.set_eval_mode()
+            save_clip(clip_enc._model, save_path)
+            clip_enc.set_train_mode()
+            print(f"  Epoch {epoch:03d}/{epochs} | loss={avg_loss:.4f} | "
+                  f"lr={scheduler.get_last_lr()[0]:.2e} | {elapsed:.1f}s"
+                  f"  ** best — saved")
+        else:
+            print(f"  Epoch {epoch:03d}/{epochs} | loss={avg_loss:.4f} | "
+                  f"lr={scheduler.get_last_lr()[0]:.2e} | {elapsed:.1f}s")
+
+    # ── training complete ──────────────────────────────────────────────────────
+    # best model is already on disk; just switch encoder to eval mode
     clip_enc.set_eval_mode()
-    save_clip(clip_enc._model, save_path)
-    print(f"  Fine-tuned CLIP saved to {save_path}")
+    print(f"\n  Best epoch: {best_epoch}/{epochs} (loss={best_loss:.4f})"
+          f" — saved to {save_path}")
 
     return {"train_loss": history}
 
