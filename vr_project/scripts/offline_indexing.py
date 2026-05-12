@@ -178,7 +178,7 @@ def build_index(
         if i in done_set:
             continue
 
-        img_path = root / "Img/" / rel_path
+        img_path = root / rel_path
         if not img_path.exists():
             print(f"[Indexing] Warning: image not found: {img_path}")
             continue
