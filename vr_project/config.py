@@ -69,7 +69,7 @@ LEARNING_RATE          = 1e-5
 WEIGHT_DECAY           = 1e-4
 TEMPERATURE            = 0.07     # contrastive loss temperature
 TRAIN_LAST_N_BLOCKS    = 4        # fine-tune only last N vision transformer blocks
-SEEDS                  = [42, 0, 7, 21]  # stand-ins for roll-number seeds
+SEEDS                  = [95, 116, 117, 504]  # stand-ins for roll-number seeds
 
 # ─────────────────────────────────────────────
 # Retrieval
