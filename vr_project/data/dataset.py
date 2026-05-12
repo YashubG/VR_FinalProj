@@ -56,46 +56,107 @@ from utils.image_utils import get_clip_transform, load_image
 # ─────────────────────────────────────────────────────────────────────────────
 # Split parsing helpers
 # ─────────────────────────────────────────────────────────────────────────────
+def _resolve_image_prefix(dataset_dir, sample_path):
+    """
+    The DeepFashion partition file stores paths like:
+        img/WOMEN/Tees_Tanks/id_00002260/01_2_side.jpg
+ 
+    But the actual files on disk may live under a different root depending
+    on how the dataset was extracted.  Common layouts:
+ 
+        dataset_dir / img / WOMEN / ...           <- official release
+        dataset_dir / Img / img / WOMEN / ...     <- Kaggle zip extraction
+        dataset_dir / images / img / WOMEN / ...  <- some mirrors
+ 
+    We probe candidate prefixes with the first real path from the partition
+    file and return the (prefix, strip) pair that resolves to an existing
+    file, so no manual path editing is ever needed.
+ 
+    Parameters
+    ----------
+    prefix : sub-directory to prepend (e.g. "Img")
+    strip  : leading token to remove from the raw path before joining
+             (e.g. "img/" avoids "Img/img/img/..." doubling)
+    """
+    candidates = [
+        ("",        ""),        # official:  dataset_dir/img/...
+        ("Img",     ""),        # Kaggle:    dataset_dir/Img/img/...
+        ("Img/img", "img/"),    # alt Kaggle: strip leading "img/" then prepend Img/img
+        ("images",  ""),
+        ("img",     "img/"),
+    ]
+    for prefix, strip in candidates:
+        test = sample_path
+        if strip and test.startswith(strip):
+            test = test[len(strip):]
+        probe = (Path(dataset_dir) / prefix / test) if prefix else (Path(dataset_dir) / test)
+        if probe.exists():
+            print(f"[Dataset] Image root resolved: '{prefix or "<direct>"}' (strip='{strip}')")
+            return prefix, strip
+    print(f"[Dataset] WARNING: could not resolve '{sample_path}' under {dataset_dir}. "
+          "Check your dataset layout.")
+    return "", ""
 
 def parse_official_splits(
     dataset_dir: Path = DATASET_DIR,
 ) -> Dict[str, List[Tuple[str, str]]]:
     """
     Parse the official DeepFashion In-Shop partition file.
-
+ 
     Returns a dict:
         {"train": [(rel_path, item_id), ...],
          "query": [...],
          "gallery": [...]}
-
+ 
     The official format of list_eval_partition.txt is:
         <num_items>
         image_name item_id evaluation_status
         img/TOPS/id_00000001/01_1_front.jpg id_00000001 train
         ...
+ 
+    Path resolution
+    ---------------
+    The partition file records paths relative to the dataset root, but the
+    actual disk layout depends on how the dataset was extracted.
+    We auto-detect the layout via _resolve_image_prefix() by probing with
+    the first path in the file, then rewrite all stored paths consistently.
+    This means the code works on Kaggle, the official release, and mirrors
+    without any manual config changes.
     """
-    partition_file = dataset_dir / "Anno" / "list_eval_partition.txt"
+    partition_file = Path(dataset_dir) / "Anno" / "list_eval_partition.txt"
     splits: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-
+ 
     if not partition_file.exists():
         print(f"[Dataset] Official partition file not found: {partition_file}")
         return splits
-
+ 
     with open(str(partition_file)) as f:
         lines = f.readlines()
-
-    # Skip first two header lines
+ 
+    # Collect raw records (skip two header lines)
+    raw = []
     for line in lines[2:]:
         parts = line.strip().split()
-        if len(parts) < 3:
-            continue
-        rel_path, item_id, split = parts[0], parts[1], parts[2].lower()
+        if len(parts) >= 3:
+            raw.append((parts[0], parts[1], parts[2].lower()))
+ 
+    if not raw:
+        return dict(splits)
+ 
+    # Auto-detect prefix using the first path in the file
+    prefix, strip = _resolve_image_prefix(dataset_dir, raw[0][0])
+ 
+    for rel_path, item_id, split in raw:
+        # Apply strip before prefix to avoid duplicate segments
+        if strip and rel_path.startswith(strip):
+            rel_path = rel_path[len(strip):]
+        if prefix:
+            rel_path = str(Path(prefix) / rel_path)
         splits[split].append((rel_path, item_id))
-
+ 
     for k, v in splits.items():
         print(f"[Dataset] '{k}': {len(v):,} images")
     return dict(splits)
-
 
 def load_split_csv(split_file: Path) -> List[Tuple[str, str]]:
     """
