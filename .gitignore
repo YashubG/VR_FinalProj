@@ -6,3 +6,4 @@ yolo/
 blip2/
 *.bin
 *.pkl
+.env

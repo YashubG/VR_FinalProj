@@ -91,7 +91,7 @@ def _resolve_image_prefix(dataset_dir, sample_path):
             test = test[len(strip):]
         probe = (Path(dataset_dir) / prefix / test) if prefix else (Path(dataset_dir) / test)
         if probe.exists():
-            print(f"[Dataset] Image root resolved: '{prefix or "<direct>"}' (strip='{strip}')")
+            print(f"[Dataset] Image root resolved: '{prefix or '<direct>'}' (strip='{strip}')")
             return prefix, strip
     print(f"[Dataset] WARNING: could not resolve '{sample_path}' under {dataset_dir}. "
           "Check your dataset layout.")

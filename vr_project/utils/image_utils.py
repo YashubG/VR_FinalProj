@@ -140,7 +140,7 @@ def l2_normalise(v: np.ndarray) -> np.ndarray:
 def resize_for_display(img: Image.Image, max_size: int = 512) -> Image.Image:
     """Proportionally resize an image so its longest side ≤ max_size."""
     W, H = img.size
-    # if max(W, H) <= max_size:
-    #     return img
+    if max(W, H) <= max_size:
+        return img
     scale = max_size / max(W, H)
     return img.resize((int(W * scale), int(H * scale)), Image.LANCZOS)

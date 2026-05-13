@@ -67,19 +67,21 @@ def ndcg_at_k(
     Rewards placing relevant items early in the ranking.
     A relevant item at rank 1 contributes log2(2)=1.0; at rank 5, log2(6)≈0.39.
 
-    DCG@K  = Σ_{i=1}^{K} rel_i / log2(i+1)
+    DCG@K  = Σ_{i=1}^{K} rel_i / log2(i+1)  [counting first occurrence of each relevant item]
     IDCG@K = DCG of ideal ranking (all relevant items at top)
-    NDCG@K = DCG@K / IDCG@K
+    NDCG@K = DCG@K / IDCG@K ∈ [0,1]
 
-    Binary relevance (rel_i ∈ {0,1}).
+    Binary relevance (rel_i ∈ {0,1}). Each item_id counted only once.
     """
     if not relevant:
         return 0.0
 
     dcg = 0.0
+    seen_items = set()  # Track items already counted to prevent duplicates
     for i, item_id in enumerate(retrieved[:k], start=1):
-        if item_id in relevant:
+        if item_id in relevant and item_id not in seen_items:
             dcg += 1.0 / math.log2(i + 1)
+            seen_items.add(item_id)
 
     # Ideal DCG: place all relevant items first (up to K)
     n_relevant_in_k = min(len(relevant), k)
@@ -102,6 +104,7 @@ def average_precision_at_k(
 
     where precision_at_i = (number of relevant in top-i) / i
     and   rel_i = 1 if item at rank i is relevant else 0.
+    Each item_id counted only on first occurrence → AP ∈ [0,1]
 
     Rewards both finding relevant items AND ranking them early.
     """
@@ -110,11 +113,13 @@ def average_precision_at_k(
 
     num_hits = 0
     cumulative_precision = 0.0
+    seen_items = set()  # Track items already counted to prevent duplicates
 
     for i, item_id in enumerate(retrieved[:k], start=1):
-        if item_id in relevant:
+        if item_id in relevant and item_id not in seen_items:
             num_hits += 1
             cumulative_precision += num_hits / i
+            seen_items.add(item_id)
 
     normaliser = min(len(relevant), k)
     if normaliser == 0:

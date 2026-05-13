@@ -311,10 +311,18 @@ def manual_adjustment_widget(base_img: Image.Image) -> Image.Image:
         top = st.slider("Top boundary (%)", 0, 100, 0, 1)
         bottom = st.slider("Bottom boundary (%)", 0, 100, 100, 1)
 
+    left, right = sorted((left, right))
+    top, bottom = sorted((top, bottom))
+
     x1 = int(w * left / 100)
     x2 = int(w * right / 100)
     y1 = int(h * top / 100)
     y2 = int(h * bottom / 100)
+
+    if x2 <= x1 or y2 <= y1:
+        st.warning("The selected crop is empty. Using the base crop instead.")
+        return base_img
+
     adjusted = base_img.crop((x1, y1, x2, y2))
     st.image(resize_for_display(adjusted, 360), use_container_width=True)
     return adjusted
