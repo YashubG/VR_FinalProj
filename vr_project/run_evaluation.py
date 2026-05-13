@@ -335,7 +335,7 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
                 detector=detector,
                 clip_enc=clip_enc,
                 captioner=captioner,
-                shared_cache = shared_cache,
+                caption_cache = shared_cache,
             )
         else:
             # Ablation B / frozen: all seeds share the same gallery index.
