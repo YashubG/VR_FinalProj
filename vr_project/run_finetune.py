@@ -80,7 +80,29 @@ def main():
             lr          = args.lr,
             last_n_blocks = args.last_n_blocks,
         )
+        print("\n[run_finetune] Multi-seed training complete.")
+        print("  Per-seed checkpoints:")
+        for tag, info in results.items():
+            print(f"    {tag}: {info.get('save_path', 'N/A')}")
+
+        # Write a canonical checkpoint so that --finetuned (without --checkpoint)
+        # works in run_indexing.py and run_evaluation.py. We use the first seed's
+        # best checkpoint as the canonical model. For proper mean±std reporting,
+        # always use run_evaluation.py --multiseed-eval --rebuild-index instead.
+        import shutil
+        from config import CLIP_LOCAL_PATH, MODELS_DIR
+        first_seed = SEEDS[0]
+        first_ckpt = MODELS_DIR / f"clip_finetuned_seed_{first_seed}.pt"
+        if first_ckpt.exists():
+            shutil.copy(str(first_ckpt), str(CLIP_LOCAL_PATH))
+            print(f"\n  Canonical checkpoint (seed {first_seed}) → {CLIP_LOCAL_PATH}")
+            print("  (Used by --finetuned flag; for multi-seed metrics use --multiseed-eval)")
+        else:
+            print(f"\n  WARNING: Could not copy canonical checkpoint — {first_ckpt} not found.")
+
+        print("\n  Next step: python run_evaluation.py --multiseed-eval --rebuild-index")
     else:
+        from config import CLIP_LOCAL_PATH
         results = train_one_seed(
             train_records,
             seed        = args.seed,
@@ -89,9 +111,16 @@ def main():
             batch_size  = args.batch_size,
             lr          = args.lr,
             last_n_blocks = args.last_n_blocks,
+            # Single-seed mode writes to the canonical path (not seed-tagged).
+            # For multi-seed ablation reporting use --multiseed instead.
+            save_path   = CLIP_LOCAL_PATH,
         )
+        print(f"\n[run_finetune] Single-seed training complete.")
+        print(f"  Checkpoint saved to: {CLIP_LOCAL_PATH}")
+        print("  Tip: use --multiseed to train all seeds and enable "
+              "run_evaluation.py --multiseed-eval")
 
-    print("\n[run_finetune] Training complete.")
+    print("\n[run_finetune] Done.")
 
 
 if __name__ == "__main__":

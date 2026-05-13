@@ -154,8 +154,12 @@ def build_index(
         print("[Indexing] Loading YOLO detector ...")
         detector = YOLODetector()
     if clip_enc is None:
-        print("[Indexing] Loading CLIP encoder ...")
-        clip_enc = CLIPEncoder()
+        print("[Indexing] Loading CLIP encoder (frozen base) ...")
+        # NOTE: use_finetuned=False is explicit here so that the base model is
+        # always used when no encoder is supplied. This prevents accidentally
+        # loading a fine-tuned checkpoint that may exist at CLIP_LOCAL_PATH
+        # for Ablation A / B indices.
+        clip_enc = CLIPEncoder(use_finetuned=False)
     if captioner is None and use_blip2 and alpha < 1.0:
         print("[Indexing] Loading BLIP-2 captioner ...")
         captioner = BLIP2Captioner()

@@ -148,12 +148,14 @@ class RetrievalPipeline:
         use_reranking: bool           = True,
         beta:          float          = 0.5,
         device:        str            = DEVICE,
+        use_finetuned: bool = False,
+        finetuned_path: Optional[Path] = None
     ) -> None:
         from config import HNSW_INDEX_PATH, HNSW_METADATA_PATH
 
         print("[Pipeline] Loading models ...")
         self.detector   = YOLODetector(device=device)
-        self.clip_enc   = CLIPEncoder(alpha=alpha, device=device)
+        self.clip_enc   = CLIPEncoder(alpha=alpha, device=device, use_finetuned=use_finetuned, local_finetuned_path=finetuned_path)
         self.itm_scorer = BLIP2ITM(device=device) if use_reranking else None
         self.use_reranking = use_reranking
         self.beta      = beta

@@ -42,7 +42,7 @@ from config import (
     ALPHA,
     DEVICE,
 )
-
+from models.captioner import BLIP2ITM
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Argument parsing
@@ -81,30 +81,43 @@ def parse_args():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_query_folder(
-    query_dir: Path,
-    index_tag: str,
-    alpha:     float,
-    top_k:     List[int],
-    use_rerank: bool,
-    finetuned:  bool,
+    query_dir:       Path,
+    index_tag:       str,
+    alpha:           float,
+    top_k:           List[int],
+    use_rerank:      bool,
+    checkpoint_path: Optional[Path] = None,
 ) -> None:
     """
     Run retrieval on every image in a folder; print ranked results.
     No ground-truth metrics computed (no item_id labels available).
+
+    Parameters
+    ----------
+    checkpoint_path : Optional path to a fine-tuned CLIP .pt file.
+                      If None the frozen base CLIP is used.
     """
     from models.detector import YOLODetector
     from models.clip_encoder import CLIPEncoder
-    from models.captioner import BLIP2Captioner
+    from models.captioner import BLIP2ITM
     from scripts.index_builder import HNSWIndex
     from scripts.online_retrieval import retrieve
     from utils.image_utils import load_image
 
     # Load models
     detector = YOLODetector()
-    clip_enc = CLIPEncoder(alpha=alpha)
-    captioner = BLIP2Captioner() if use_rerank else None
+    if checkpoint_path is not None:
+        if not checkpoint_path.exists():
+            print(f"ERROR: checkpoint not found: {checkpoint_path}")
+            sys.exit(1)
+        clip_enc = CLIPEncoder(alpha=alpha, use_finetuned=True,
+                               local_finetuned_path=checkpoint_path)
+    else:
+        clip_enc = CLIPEncoder(alpha=alpha, use_finetuned=False)
 
-    # Load index
+    itm_scorer = BLIP2ITM() if use_rerank else None
+
+    # ── Load index ────────────────────────────────────────────────────────────
     idx_path  = EMBEDDINGS_DIR / f"{index_tag}_hnsw.bin"
     meta_path = EMBEDDINGS_DIR / f"{index_tag}_metadata.pkl"
     index = HNSWIndex.load(idx_path, meta_path)
@@ -112,7 +125,7 @@ def evaluate_query_folder(
         print(f"ERROR: Index not found at {idx_path}")
         sys.exit(1)
 
-    # Run on each image
+    # ── Run on each image ─────────────────────────────────────────────────────
     exts = {".jpg", ".jpeg", ".png", ".webp"}
     query_files = sorted(f for f in query_dir.iterdir() if f.suffix.lower() in exts)
     print(f"\nQuerying {len(query_files)} images ...")
@@ -121,7 +134,7 @@ def evaluate_query_folder(
     for qf in query_files:
         img = load_image(qf)
         results = retrieve(
-            img, index, clip_enc, detector, captioner,
+            img, index, clip_enc, detector, itm_scorer=itm_scorer,
             top_k=max_k, use_reranking=use_rerank,
         )
         print(f"\n  Query: {qf.name}")
@@ -141,9 +154,17 @@ def main():
 
     # ── No-GT mode: just a folder of query images ────────────────────────────
     if args.query_dir is not None:
+        # Resolve checkpoint: --checkpoint > --finetuned > base CLIP
+        ckpt: Optional[Path] = None
+        if args.checkpoint:
+            ckpt = Path(args.checkpoint)
+        elif args.finetuned:
+            from config import CLIP_LOCAL_PATH
+            ckpt = CLIP_LOCAL_PATH
         evaluate_query_folder(
             args.query_dir, args.index_tag, args.alpha,
-            args.top_k, not args.no_rerank, args.finetuned,
+            args.top_k, not args.no_rerank,
+            checkpoint_path=ckpt,
         )
         return
 
@@ -175,18 +196,18 @@ def main():
     # ── Load models ───────────────────────────────────────────────────────────
     from models.detector import YOLODetector
     from models.clip_encoder import CLIPEncoder
-    from models.captioner import BLIP2Captioner
     from scripts.index_builder import HNSWIndex
     from evaluation.evaluate import run_evaluation
 
     detector  = YOLODetector()
-    captioner = None if args.no_rerank else BLIP2Captioner()
+    # captioner = None if args.no_rerank else BLIP2Captioner()
+    itm_scorer = None if args.no_rerank else BLIP2ITM()
 
     # ── Multi-seed evaluation mode ────────────────────────────────────────────
     if getattr(args, "multiseed_eval", False):
         _run_multiseed_eval(
             args, query_records, gallery_records, root,
-            detector, captioner,
+            detector, itm_scorer,
         )
         return
 
@@ -194,11 +215,14 @@ def main():
     # --checkpoint overrides --finetuned: lets you point at any specific .pt file,
     # e.g. models/clip_finetuned_seed_42.pt produced by run_finetune.py --multiseed
     if args.checkpoint:
-        from models.clip_encoder import CLIPEncoder, load_clip_weights
-        clip_enc = CLIPEncoder(alpha=args.alpha,
+        clip_enc = CLIPEncoder(alpha=args.alpha, use_finetuned=True,
                                local_finetuned_path=args.checkpoint)
+    elif args.finetuned:
+        from config import CLIP_LOCAL_PATH
+        clip_enc = CLIPEncoder(alpha=args.alpha, use_finetuned=True,
+                            local_finetuned_path=CLIP_LOCAL_PATH)
     else:
-        clip_enc = CLIPEncoder(alpha=args.alpha)
+        clip_enc = CLIPEncoder(alpha=args.alpha, use_finetuned=False)
 
     # ── Load index ────────────────────────────────────────────────────────────
     tag       = args.index_tag
@@ -218,7 +242,7 @@ def main():
         index           = index,
         clip_enc        = clip_enc,
         detector        = detector,
-        captioner       = captioner,
+        itm_scorer      = itm_scorer,
         top_k_values    = args.top_k,
         use_reranking   = not args.no_rerank,
         tag             = tag,
@@ -238,29 +262,29 @@ def main():
 
 
 def _run_multiseed_eval(args, query_records, gallery_records, root,
-                        detector, captioner):
+                        detector, itm_scorer):
     """
-    Evaluate every per-seed checkpoint in models/ and report mean ± std.
+    Evaluate every per-seed checkpoint saved by ``run_finetune.py --multiseed``
+    and report mean ± std across seeds.
 
-    Each seed produced a different fine-tuned model via run_finetune.py
-    --multiseed. Inference is deterministic per checkpoint — the variation
-    across seeds comes entirely from the different training trajectories,
-    not from any randomness at eval time.
+    Checkpoint naming convention (from finetune_clip.py):
+        models/clip_finetuned_seed_<SEED>.pt
 
     If --rebuild-index is set, a fresh HNSW index is built from each seed's
-    checkpoint (necessary for Ablation C where the gallery embeddings themselves
-    change with the model). If not set, the existing index is reused (valid
-    for Ablation B where CLIP is frozen and embeddings are identical).
+    checkpoint (necessary for Ablation C where the gallery embeddings change
+    with the model weights).  If not set, the existing shared index is reused
+    (valid when CLIP is frozen and embeddings are identical across seeds).
     """
+    import glob
+    import numpy as np
     from models.clip_encoder import CLIPEncoder
     from scripts.index_builder import HNSWIndex
     from scripts.offline_indexing import build_index
     from evaluation.evaluate import run_evaluation
     from evaluation.metrics import format_metrics
     from config import MODELS_DIR
-    import glob, numpy as np
 
-    # Find all per-seed checkpoints
+    # ── Discover per-seed checkpoints produced by run_finetune.py ────────────
     pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
     ckpt_files = sorted(glob.glob(pattern))
     if not ckpt_files:
@@ -268,38 +292,61 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
         print("Run: python run_finetune.py --multiseed")
         sys.exit(1)
 
-    print(f"[MultiSeedEval] Found {len(ckpt_files)} checkpoints: "
+    print(f"[MultiSeedEval] Found {len(ckpt_files)} checkpoint(s): "
           f"{[Path(c).name for c in ckpt_files]}")
 
-    all_metrics = {}
+    # Whether to use BLIP-2 reranking (--no-rerank disables it)
+    use_reranking = not args.no_rerank
+
+    all_metrics: dict = {}
+
     for ckpt_path in ckpt_files:
-        seed_tag = Path(ckpt_path).stem.replace("clip_finetuned_", "")
+        ckpt_path = Path(ckpt_path)
+        # Derive a readable tag, e.g. "seed_42" from "clip_finetuned_seed_42.pt"
+        seed_tag = ckpt_path.stem.replace("clip_finetuned_", "")
         print(f"\n{'='*55}")
-        print(f"  Evaluating {seed_tag}")
+        print(f"  Evaluating checkpoint: {ckpt_path.name}  [{seed_tag}]")
         print("="*55)
 
-        clip_enc = CLIPEncoder(alpha=args.alpha,
-                               local_finetuned_path=Path(ckpt_path))
+        clip_enc = CLIPEncoder(
+            alpha=args.alpha,
+            use_finetuned=True,
+            local_finetuned_path=ckpt_path,
+        )
 
-        if getattr(args, "rebuild_index", False):
-            # Build a fresh index using this seed's embeddings
+        # ── Build or load the gallery index for this seed ─────────────────────
+        if args.rebuild_index:
+            # Ablation C: embeddings change per seed → must rebuild index.
             idx_tag = f"{args.index_tag}_{seed_tag}"
-            print(f"  Building index for {seed_tag} ...")
+            print(f"  Building index tag={idx_tag} ...")
+            if use_reranking:
+                from models.captioner import BLIP2Captioner
+                captioner = BLIP2Captioner()
+            else:
+                captioner = None
             index = build_index(
-                gallery_records, root=root, alpha=args.alpha,
-                use_blip2=not args.no_rerank, tag=idx_tag,
-                detector=detector, clip_enc=clip_enc,
-                captioner=captioner if not args.no_rerank else None,
+                gallery_records,
+                root=root,
+                alpha=args.alpha,
+                use_blip2=use_reranking,
+                tag=idx_tag,
+                detector=detector,
+                clip_enc=clip_enc,
+                captioner=captioner,
             )
         else:
+            # Ablation B / frozen: all seeds share the same gallery index.
             idx_tag   = args.index_tag
             idx_path  = EMBEDDINGS_DIR / f"{idx_tag}_hnsw.bin"
             meta_path = EMBEDDINGS_DIR / f"{idx_tag}_metadata.pkl"
             index = HNSWIndex.load(idx_path, meta_path)
             if index is None:
-                print(f"  ERROR: Index not found. Use --rebuild-index.")
+                print(f"  ERROR: Index '{idx_tag}' not found.")
+                print("  Hint: pass --rebuild-index to build one per seed,"
+                      " or run run_indexing.py first.")
                 sys.exit(1)
 
+        # ── Run evaluation for this seed's checkpoint ─────────────────────────
         metrics = run_evaluation(
             query_records   = query_records,
             gallery_records = gallery_records,
@@ -307,31 +354,47 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
             index           = index,
             clip_enc        = clip_enc,
             detector        = detector,
-            captioner       = captioner if not args.no_rerank else None,
+            itm_scorer      = itm_scorer if use_reranking else None,
             top_k_values    = args.top_k,
-            use_reranking   = not args.no_rerank,
+            use_reranking   = use_reranking,
             tag             = seed_tag,
         )
         all_metrics[seed_tag] = metrics
         print(format_metrics(metrics, args.top_k))
 
-    # Aggregate mean ± std across seeds
+    # ── Aggregate mean ± std across all seeds ─────────────────────────────────
+    if not all_metrics:
+        print("ERROR: No metrics collected. Check checkpoint paths.")
+        sys.exit(1)
+
     print("\n" + "="*55)
-    print("  AGGREGATE (mean ± std across seeds)")
+    print(f"  AGGREGATE (mean ± std across {len(all_metrics)} seed(s))")
     print("="*55)
 
-    agg = {}
-    metric_keys = [k for k in list(all_metrics.values())[0]
-                   if not k.endswith("_std") and k != "num_queries"]
+    first_metrics = next(iter(all_metrics.values()))
+    metric_keys = [
+        k for k in first_metrics
+        if not k.endswith("_std") and k != "num_queries"
+    ]
+
+    agg: dict = {}
     for k in metric_keys:
         vals = [all_metrics[s][k] for s in all_metrics]
-        agg[k]              = float(np.mean(vals))
-        agg[f"{k}_std"]     = float(np.std(vals))
-        print(f"  {k:<15} {agg[k]:.4f} ± {agg[f'{k}_std']:.4f}")
+        agg[k]          = float(np.mean(vals))
+        agg[f"{k}_std"] = float(np.std(vals))
+        print(f"  {k:<20} {agg[k]:.4f} ± {agg[f'{k}_std']:.4f}")
 
     out_path = args.out or RESULTS_DIR / f"{args.index_tag}_multiseed_metrics.json"
     with open(str(out_path), "w") as f:
-        json.dump({"per_seed": all_metrics, "aggregate": agg}, f, indent=2)
+        json.dump(
+            {
+                "seeds": list(all_metrics.keys()),
+                "per_seed": all_metrics,
+                "aggregate": agg,
+            },
+            f,
+            indent=2,
+        )
     print(f"\n[MultiSeedEval] Saved to {out_path}")
 
 

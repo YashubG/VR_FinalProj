@@ -59,31 +59,14 @@ from utils.image_utils import load_image
 # Build ground-truth relevant sets
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_relevant_sets(
-    query_records:   List[Tuple[str, str]],
-    gallery_records: List[Tuple[str, str]],
-) -> Dict[str, Set[str]]:
-    """
-    For each query image, build the set of gallery item_ids that are relevant.
-
-    Relevant = same item_id as the query, excluding the query image itself.
-
-    Returns
-    -------
-    Dict mapping query_path → set of relevant item_ids in gallery.
-    """
-    # Map item_id → set of gallery paths (for GT lookup)
-    gallery_item_to_paths: Dict[str, Set[str]] = {}
-    for gpath, gid in gallery_records:
-        gallery_item_to_paths.setdefault(gid, set()).add(gpath)
-
+def build_relevant_sets(query_records, gallery_records):
     relevant: Dict[str, Set[str]] = {}
+    gallery_by_id: Dict[str, Set[str]] = {}
+    for gpath, gid in gallery_records:
+        gallery_by_id.setdefault(gid, set()).add(gid)
     for qpath, qid in query_records:
-        # All gallery items with same item_id are relevant
-        gallery_paths = gallery_item_to_paths.get(qid, set())
-        # We return item_ids as the relevant set (not paths) for metric computation
-        relevant[qpath] = {qid} if gallery_paths else set()
-
+        # Store the item_id itself (matched against retrieved item_ids)
+        relevant[qpath] = {gid for _, gid in gallery_records if gid == qid}   # all gallery images share item_id qid
     return relevant
 
 
@@ -160,7 +143,9 @@ def run_evaluation(
         retrieved_ids = [c["item_id"] for c in candidates]
 
         # FIX: use the gallery-aware relevant set instead of the inline {qid}.
-        relevant = relevant_sets.get(qpath, {qid})
+        relevant = relevant_sets.get(qpath, set())
+        if len(relevant) == 0:
+            print(f"[Eval] WARNING: no relevant set for {qpath}")
 
         all_results.append({
             "query_item_id": qid,
@@ -215,7 +200,7 @@ def run_ablation_study(
 
     index_a = build_index(
         gallery_records, root=root, alpha=1.0,
-        use_blip2=False, tag="ablation_A"
+        use_blip2=False, tag="ablation_A", clip_enc=clip_enc,
     )
     metrics_a = run_evaluation(
         query_records, gallery_records, root,
@@ -261,7 +246,6 @@ def run_ablation_study(
     # for every alpha, and report mean ± std — matching the methodology used
     # by run_evaluation.py --multiseed-eval.
     from scripts.finetune_clip import run_multiseed_training
-    import numpy as np as _np
     from config import CLIP_LOCAL_PATH, MODELS_DIR
 
     multiseed_results = run_multiseed_training(train_records, seeds=seeds, root=root)
@@ -297,8 +281,8 @@ def run_ablation_study(
         agg: Dict[str, float] = {}
         for k in metric_keys:
             vals = [sm[k] for sm in seed_metrics_for_alpha]
-            agg[k]          = float(_np.mean(vals))
-            agg[f"{k}_std"] = float(_np.std(vals))
+            agg[k]          = float(np.mean(vals))
+            agg[f"{k}_std"] = float(np.std(vals))
 
         key = f"C_alpha{alpha}"
         all_results[key] = agg
