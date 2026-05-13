@@ -100,7 +100,7 @@ class CaptionCache:
     def __init__(
         self,
         cache_path: Path = _DEFAULT_CAPTION_CACHE_PATH,
-        flush_every: int = 1,
+        flush_every: int = 1000,
     ) -> None:
         self.cache_path  = Path(cache_path)
         self.flush_every = flush_every
