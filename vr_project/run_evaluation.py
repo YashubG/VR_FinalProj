@@ -199,15 +199,20 @@ def main():
     from scripts.index_builder import HNSWIndex
     from evaluation.evaluate import run_evaluation
 
-    detector  = YOLODetector()
-    # captioner = None if args.no_rerank else BLIP2Captioner()
+    detector = YOLODetector()
+
+    # FIX: Only load BLIP2ITM when actually needed for the single-checkpoint path.
+    # For --multiseed-eval, the itm_scorer is constructed inside _run_multiseed_eval
+    # to keep all model-loading logic co-located there.
+    # We still pass a (possibly None) itm_scorer for the single-checkpoint path.
     itm_scorer = None if args.no_rerank else BLIP2ITM()
 
     # ── Multi-seed evaluation mode ────────────────────────────────────────────
-    if getattr(args, "multiseed_eval", False):
+    # FIX: use args.multiseed_eval directly (argparse dest for --multiseed-eval)
+    # instead of getattr() with a fallback, which masked typos silently.
+    if args.multiseed_eval:
         _run_multiseed_eval(
-            args, query_records, gallery_records, root,
-            detector, itm_scorer,
+            args, query_records, gallery_records, root, detector,
         )
         return
 
@@ -261,8 +266,7 @@ def main():
     print(f"\n[Eval] Metrics saved to {out_path}")
 
 
-def _run_multiseed_eval(args, query_records, gallery_records, root,
-                        detector, itm_scorer):
+def _run_multiseed_eval(args, query_records, gallery_records, root, detector):
     """
     Evaluate every per-seed checkpoint saved by ``run_finetune.py --multiseed``
     and report mean ± std across seeds.
@@ -274,17 +278,26 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
     checkpoint (necessary for Ablation C where the gallery embeddings change
     with the model weights).  If not set, the existing shared index is reused
     (valid when CLIP is frozen and embeddings are identical across seeds).
+
+    Changes vs. original
+    --------------------
+    * BLIP2ITM is instantiated once here (not in main()) — the multiseed path
+      no longer receives itm_scorer from main() to keep concerns co-located.
+    * BLIP2Captioner is instantiated once before the seed loop (not once per
+      seed inside the loop), saving N-1 expensive model loads.
+    * A shared CaptionCache is created once and passed to every build_index
+      call so BLIP-2 captions generated on seed 1 are reused on seeds 2+.
+    * num_queries is excluded from the aggregate dict so the notebook's
+      ``{v:.4f}`` formatter doesn't print it as a spurious metric.
     """
     import glob
     import numpy as np
     from models.clip_encoder import CLIPEncoder
     from scripts.index_builder import HNSWIndex
-    from scripts.offline_indexing import CaptionCache,build_index
+    from scripts.offline_indexing import build_index, CaptionCache
     from evaluation.evaluate import run_evaluation
     from evaluation.metrics import format_metrics
     from config import MODELS_DIR
-
-    shared_cache = CaptionCache()
 
     # ── Discover per-seed checkpoints produced by run_finetune.py ────────────
     pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
@@ -297,8 +310,26 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
     print(f"[MultiSeedEval] Found {len(ckpt_files)} checkpoint(s): "
           f"{[Path(c).name for c in ckpt_files]}")
 
-    # Whether to use BLIP-2 reranking (--no-rerank disables it)
     use_reranking = not args.no_rerank
+
+    # FIX: Load BLIP2ITM once here (not passed in from main()) so the
+    # multiseed path is self-contained and main() doesn't pay the loading
+    # cost for models it won't use.
+    itm_scorer = BLIP2ITM() if use_reranking else None
+
+    # FIX: Load BLIP2Captioner once before the loop (not once per seed).
+    # Captioning depends only on the image, never on the CLIP checkpoint.
+    captioner = None
+    if args.rebuild_index and use_reranking:
+        from models.captioner import BLIP2Captioner
+        captioner = BLIP2Captioner()
+        print("[MultiSeedEval] BLIP2Captioner loaded (shared across all seeds)")
+
+    # FIX: Create a single shared CaptionCache so seed 1 pays the BLIP-2
+    # cost and seeds 2+ get captions from disk at near-zero cost.
+    caption_cache = CaptionCache() if (args.rebuild_index and use_reranking) else None
+    if caption_cache is not None:
+        print(f"[MultiSeedEval] {caption_cache.stats()}")
 
     all_metrics: dict = {}
 
@@ -321,11 +352,6 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
             # Ablation C: embeddings change per seed → must rebuild index.
             idx_tag = f"{args.index_tag}_{seed_tag}"
             print(f"  Building index tag={idx_tag} ...")
-            if use_reranking:
-                from models.captioner import BLIP2Captioner
-                captioner = BLIP2Captioner()
-            else:
-                captioner = None
             index = build_index(
                 gallery_records,
                 root=root,
@@ -334,8 +360,11 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
                 tag=idx_tag,
                 detector=detector,
                 clip_enc=clip_enc,
+                # FIX: pass the shared captioner (not a new one per seed)
                 captioner=captioner,
-                caption_cache = shared_cache,
+                # FIX: pass the shared cache so captions from seed 1 are
+                # reused on all subsequent seeds
+                caption_cache=caption_cache,
             )
         else:
             # Ablation B / frozen: all seeds share the same gallery index.
@@ -375,6 +404,9 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
     print("="*55)
 
     first_metrics = next(iter(all_metrics.values()))
+    # FIX: also exclude num_queries from the aggregate dict — the notebook
+    # iterates aggregate with `{v:.4f}` which would print "200.0000" as if
+    # it were a metric.
     metric_keys = [
         k for k in first_metrics
         if not k.endswith("_std") and k != "num_queries"
@@ -391,7 +423,7 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
     with open(str(out_path), "w") as f:
         json.dump(
             {
-                "seeds": list(all_metrics.keys()),
+                "seeds":    list(all_metrics.keys()),
                 "per_seed": all_metrics,
                 "aggregate": agg,
             },
