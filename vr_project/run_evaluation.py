@@ -279,10 +279,12 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
     import numpy as np
     from models.clip_encoder import CLIPEncoder
     from scripts.index_builder import HNSWIndex
-    from scripts.offline_indexing import build_index
+    from scripts.offline_indexing import CaptionCache,build_index
     from evaluation.evaluate import run_evaluation
     from evaluation.metrics import format_metrics
     from config import MODELS_DIR
+
+    shared_cache = CaptionCache()
 
     # ── Discover per-seed checkpoints produced by run_finetune.py ────────────
     pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
@@ -333,6 +335,7 @@ def _run_multiseed_eval(args, query_records, gallery_records, root,
                 detector=detector,
                 clip_enc=clip_enc,
                 captioner=captioner,
+                shared_cache = shared_cache,
             )
         else:
             # Ablation B / frozen: all seeds share the same gallery index.
