@@ -91,7 +91,7 @@ def retrieve(
 
     # Step 4: BLIP-2 ITM re-ranking
     captions   = [c["caption"] for c in candidates]
-    itm_scores = itm_scorer.itm_scores_batch(cropped, captions)
+    itm_scores = itm_scorer.itm_scores_batch(cropped, captions,itm_batch_size=32)
 
     for cand, itm in zip(candidates, itm_scores):
         cosine = cand["score"]

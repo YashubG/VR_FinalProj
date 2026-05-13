@@ -134,7 +134,7 @@ def run_evaluation(
             detector      = detector,
             itm_scorer    = itm_scorer if use_reranking else None,
             top_k         = max_k,
-            rerank_top_k  = max_k * 5,
+            rerank_top_k  = max_k * 2,
             beta          = beta,
             use_reranking = use_reranking and (itm_scorer is not None),
         )
