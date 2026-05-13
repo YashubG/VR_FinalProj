@@ -213,11 +213,18 @@ class BLIP2ITM:
     This checkpoint couples the BLIP-2 Q-Former to a lightweight ITM
     classification head trained with contrastive + matching objectives.
     The LLM decoder is absent — the model is much smaller and faster than
-    the generative variant and outputs a 2-class (no-match / match) logit
-    tensor directly from the Q-Former output.
+    the generative variant.
 
-    forward() returns an object with:
-        .itm_score : (B, 2) float tensor — no-match logit, match logit
+    The forward pass must be called with ``use_image_text_matching_head=True``
+    to activate the binary ITM head (``nn.Linear(hidden_size, 2)``).
+    Without that flag the model runs in contrastive mode and returns an
+    ``(image_batch, text_batch)`` similarity matrix instead.
+
+    forward() returns ``Blip2ImageTextMatchingModelOutput`` with:
+        .logits_per_image : (B, 2) float tensor — [no-match logit, match logit]
+
+    Note: the field is ``logits_per_image``, NOT ``itm_score``.
+    ``Blip2ImageTextMatchingModelOutput`` has no ``itm_score`` attribute.
 
     We take softmax over dim=-1 and return the match probability (column 1),
     giving a calibrated score in [0, 1].
@@ -280,9 +287,15 @@ class BLIP2ITM:
             truncation=True,
         ).to(self.device)
 
-        outputs = self._model(**inputs)
-        # outputs.itm_score: (1, 2) — no-match logit, match logit
-        return float(F.softmax(outputs.itm_score, dim=-1)[0, 1].item())
+        # use_image_text_matching_head=True activates the binary ITM head
+        # (nn.Linear(hidden, 2)) instead of the contrastive projection head.
+        # Without this flag the model runs in contrastive mode and returns
+        # logits_per_image of shape (B, B) — not useful for per-pair scoring.
+        outputs = self._model(**inputs, use_image_text_matching_head=True)
+        # outputs.logits_per_image: (1, 2) — [no-match logit, match logit]
+        # NOTE: the output attribute is logits_per_image, NOT itm_score.
+        # Blip2ImageTextMatchingModelOutput has no itm_score field.
+        return float(F.softmax(outputs.logits_per_image, dim=-1)[0, 1].item())
 
     # ── batched scoring ───────────────────────────────────────────────────────
 
@@ -325,9 +338,11 @@ class BLIP2ITM:
                 truncation=True,
             ).to(self.device)
 
-            outputs = self._model(**inputs)
-            # outputs.itm_score: (B, 2)
-            probs = F.softmax(outputs.itm_score, dim=-1)   # (B, 2)
-            all_scores.extend(probs[:, 1].tolist())         # match probabilities
+            outputs = self._model(**inputs, use_image_text_matching_head=True)
+            # outputs.logits_per_image: (B, 2) — [no-match logit, match logit]
+            # NOTE: the output attribute is logits_per_image, NOT itm_score.
+            # Blip2ImageTextMatchingModelOutput has no itm_score field.
+            probs = F.softmax(outputs.logits_per_image, dim=-1)   # (B, 2)
+            all_scores.extend(probs[:, 1].tolist())                # match probabilities
 
         return all_scores
