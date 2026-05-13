@@ -182,8 +182,13 @@ def train_one_seed(
         train_records, root=root, transform=transform, mode="train"
     )
     sampler   = PairBatchSampler(dataset, batch_size=batch_size, drop_last=True)
-    # generator: pins the DataLoader's internal shuffle RNG to the seed so
-    # the sequence of batches is identical across runs with the same seed.
+
+    # FIX: Re-seed torch immediately before constructing the DataLoader so that
+    # each worker's seed (derived from torch.initial_seed() at spawn time) is
+    # deterministically tied to *this* seed, not to the residual state from a
+    # previous training run.  Without this, multi-seed training produces
+    # workers with non-reproducible seeds after the first seed.
+    torch.manual_seed(seed)
     g = torch.Generator()
     g.manual_seed(seed)
     loader    = torch.utils.data.DataLoader(
@@ -196,13 +201,15 @@ def train_one_seed(
     )
 
     # ── model setup ───────────────────────────────────────────────────────────
-    clip_enc = CLIPEncoder(device=device)
+    clip_enc = CLIPEncoder(device=device, use_finetuned=False)
     clip_enc.prepare_for_finetuning()   # freeze all, unfreeze last N blocks
     clip_enc.set_train_mode()
 
     loss_fn   = InfoNCELoss(temperature=temperature).to(device)
+    # FIX: use trainable_parameters() which returns a generator; previously
+    # parameters() returned a list which is non-standard for optimisers.
     optimizer = AdamW(
-        clip_enc.parameters(),
+        clip_enc.trainable_parameters(),
         lr=lr,
         weight_decay=weight_decay,
         betas=(0.9, 0.98),
@@ -227,6 +234,14 @@ def train_one_seed(
         for batch_tensors, batch_labels in loader:
             # batch_tensors: (2*B, 3, H, W)
             # first B = anchors, last B = positives
+            # FIX: assert the batch is always even (guaranteed by drop_last=True
+            # in PairBatchSampler, but we verify explicitly to catch any
+            # accidental misconfiguration early rather than silently discarding
+            # an unpaired anchor).
+            assert len(batch_tensors) % 2 == 0, (
+                f"Batch size {len(batch_tensors)} is odd — PairBatchSampler must "
+                "use drop_last=True to ensure every anchor has a matching positive."
+            )
             batch_tensors = batch_tensors.to(device)
             B2 = len(batch_tensors)
             B  = B2 // 2
@@ -242,7 +257,7 @@ def train_one_seed(
             optimizer.zero_grad()
             loss.backward()
             # Gradient clipping prevents instability when only partial layers train
-            nn.utils.clip_grad_norm_(clip_enc.parameters(), max_norm=1.0)
+            nn.utils.clip_grad_norm_(clip_enc._model.parameters(), max_norm=1.0)
             optimizer.step()
             scheduler.step()
 

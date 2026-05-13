@@ -112,20 +112,24 @@ def run_evaluation(
       1. YOLO crop
       2. CLIP encode
       3. HNSW top-K search
-      4. (optional) BLIP-2 ITM re-rank
+      4. (optional) BLIP-2 ITM re-rank  (requires a BLIP2ITM itm_scorer)
       5. Compute metrics vs. ground truth
+
+    Note: the `captioner` (BLIP2Captioner) parameter that appeared in earlier
+    versions has been removed.  Captioning is an offline-indexing concern only.
+    Online re-ranking uses a BLIP2ITM scorer — pass that as `itm_scorer`.
 
     Returns aggregated metrics dict.
     """
     from scripts.online_retrieval import retrieve
 
-    # Build ground-truth relevant set per query
-    # relevant[qpath] = {item_id_that_matches}
-    gallery_item_ids = {gpath: gid for gpath, gid in gallery_records}
-    query_item_map   = {qpath: qid for qpath, qid in query_records}
+    # FIX: use build_relevant_sets() so that all gallery images sharing the
+    # same item_id are counted as relevant, not just a single-element set.
+    # Previously `relevant = {qid}` was constructed inline, which is correct
+    # for item-level recall but bypasses the gallery-aware relevant-set logic
+    # (e.g. items that appear multiple times in the gallery are all relevant).
+    relevant_sets = build_relevant_sets(query_records, gallery_records)
 
-    # item_id → list of gallery item_ids that are relevant
-    # (In DeepFashion, relevant = same item_id)
     all_results = []
 
     for qpath, qid in tqdm(query_records, desc=f"Evaluating [{tag}]"):
@@ -155,8 +159,8 @@ def run_evaluation(
         # Retrieved item_ids in ranked order
         retrieved_ids = [c["item_id"] for c in candidates]
 
-        # Relevant = any gallery item with the same item_id
-        relevant = {qid}   # item_id equality is the ground truth
+        # FIX: use the gallery-aware relevant set instead of the inline {qid}.
+        relevant = relevant_sets.get(qpath, {qid})
 
         all_results.append({
             "query_item_id": qid,
@@ -205,7 +209,9 @@ def run_ablation_study(
     print("="*60)
 
     detector  = YOLODetector()
-    clip_enc  = CLIPEncoder(alpha=1.0)   # frozen (no fine-tuning called)
+    # FIX: pass use_finetuned=False explicitly so the frozen base model is
+    # used even if a fine-tuned checkpoint happens to exist on disk.
+    clip_enc  = CLIPEncoder(alpha=1.0, use_finetuned=False)
 
     index_a = build_index(
         gallery_records, root=root, alpha=1.0,
@@ -228,7 +234,8 @@ def run_ablation_study(
         print(f"  ABLATION B — Frozen CLIP + BLIP-2 (α={alpha})")
         print("="*60)
 
-        clip_enc_b = CLIPEncoder(alpha=alpha)
+        # FIX: use_finetuned=False — Ablation B uses the frozen base model.
+        clip_enc_b = CLIPEncoder(alpha=alpha, use_finetuned=False)
         index_b    = build_index(
             gallery_records, root=root, alpha=alpha,
             use_blip2=True, tag=f"ablation_B_a{alpha}",
@@ -245,29 +252,58 @@ def run_ablation_study(
 
     # ── Condition C: fine-tuned CLIP + BLIP-2, two α values ──────────────────
     print(f"\n{'='*60}")
-    print("  ABLATION C — Fine-tuned CLIP + BLIP-2")
+    print("  ABLATION C — Fine-tuned CLIP + BLIP-2 (multi-seed)")
     print("="*60)
 
-    # Fine-tune once (using first seed) and share across α values
-    from config import CLIP_LOCAL_PATH
-    train_one_seed(train_records, seed=seeds[0], save_path=CLIP_LOCAL_PATH)
+    # FIX: The spec requires results averaged over 3-4 seeds.  Previously this
+    # trained with only one seed and shared that single checkpoint across all
+    # alpha values.  Now we train all seeds up-front, evaluate each checkpoint
+    # for every alpha, and report mean ± std — matching the methodology used
+    # by run_evaluation.py --multiseed-eval.
+    from scripts.finetune_clip import run_multiseed_training
+    import numpy as np as _np
+    from config import CLIP_LOCAL_PATH, MODELS_DIR
+
+    multiseed_results = run_multiseed_training(train_records, seeds=seeds, root=root)
 
     for alpha in alpha_values:
-        clip_enc_c = CLIPEncoder(alpha=alpha)   # loads fine-tuned weights automatically
-        index_c    = build_index(
-            gallery_records, root=root, alpha=alpha,
-            use_blip2=True, tag=f"ablation_C_a{alpha}",
-            detector=detector, clip_enc=clip_enc_c, captioner=captioner,
-        )
-        metrics_c = run_evaluation(
-            query_records, gallery_records, root,
-            index_c, clip_enc_c, detector,
-            itm_scorer=itm_scorer, use_reranking=True, tag=f"C_a{alpha}",
-        )
+        seed_metrics_for_alpha = []
+        for seed in seeds:
+            tag_seed = f"seed_{seed}"
+            ckpt_path = MODELS_DIR / f"clip_finetuned_{tag_seed}.pt"
+
+            # FIX: use_finetuned=True with the explicit per-seed checkpoint.
+            clip_enc_c = CLIPEncoder(
+                alpha=alpha,
+                use_finetuned=True,
+                local_finetuned_path=ckpt_path,
+            )
+            index_c = build_index(
+                gallery_records, root=root, alpha=alpha,
+                use_blip2=True, tag=f"ablation_C_a{alpha}_{tag_seed}",
+                detector=detector, clip_enc=clip_enc_c, captioner=captioner,
+            )
+            m = run_evaluation(
+                query_records, gallery_records, root,
+                index_c, clip_enc_c, detector,
+                itm_scorer=itm_scorer, use_reranking=True,
+                tag=f"C_a{alpha}_{tag_seed}",
+            )
+            seed_metrics_for_alpha.append(m)
+
+        # Aggregate mean ± std across seeds for this alpha
+        metric_keys = [k for k in seed_metrics_for_alpha[0]
+                       if not k.endswith("_std") and k != "num_queries"]
+        agg: Dict[str, float] = {}
+        for k in metric_keys:
+            vals = [sm[k] for sm in seed_metrics_for_alpha]
+            agg[k]          = float(_np.mean(vals))
+            agg[f"{k}_std"] = float(_np.std(vals))
+
         key = f"C_alpha{alpha}"
-        all_results[key] = metrics_c
-        print(f"\n  α = {alpha}:")
-        print(format_metrics(metrics_c))
+        all_results[key] = agg
+        print(f"\n  α = {alpha} (mean ± std over {len(seeds)} seeds):")
+        print(format_metrics(agg, k_values=[5, 10, 15]))
 
     # ── Save all results ─────────────────────────────────────────────────────
     save_path = RESULTS_DIR / "ablation_results.json"

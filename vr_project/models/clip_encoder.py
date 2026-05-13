@@ -26,6 +26,15 @@ Local save/load
   - `save_clip()` saves the full fine-tuned model state to a .pt file.
   - `load_clip()` restores from that file if it exists; otherwise downloads
     from open_clip hub and saves immediately.
+
+Fine-tuned weight loading
+--------------------------
+  Fine-tuned weights are only applied when `use_finetuned=True` is passed
+  explicitly to the constructor.  This prevents Ablation A / B runs from
+  accidentally inheriting weights from a previous Ablation C training run.
+  Pass `local_finetuned_path` together with `use_finetuned=True` to point
+  at a specific checkpoint (e.g. a per-seed file from run_finetune.py
+  --multiseed).
 """
 
 from __future__ import annotations
@@ -181,7 +190,12 @@ class CLIPEncoder:
     Parameters
     ----------
     local_finetuned_path : Path to a saved fine-tuned .pt state-dict.
-                           If this file exists it is loaded after base init.
+                           Only used when `use_finetuned=True`.
+    use_finetuned        : If True, overlay the fine-tuned weights from
+                           `local_finetuned_path` after loading the base model.
+                           Defaults to False so Ablation A/B always get the
+                           frozen base model, even if a fine-tuned checkpoint
+                           happens to exist on disk.
     model_name           : open_clip architecture string.
     pretrained           : open_clip weight set name.
     alpha                : Image/text fusion weight.
@@ -194,6 +208,7 @@ class CLIPEncoder:
     def __init__(
         self,
         local_finetuned_path: Path  = CLIP_LOCAL_PATH,
+        use_finetuned:        bool  = False,
         model_name:           str   = CLIP_MODEL_NAME,
         pretrained:           str   = CLIP_PRETRAINED,
         alpha:                float = ALPHA,
@@ -205,7 +220,8 @@ class CLIPEncoder:
         self.device  = device
         self._transform = get_clip_transform()
         self._model, self._tokenizer = self._load(
-            local_finetuned_path, model_name, pretrained, device, save_after_load
+            local_finetuned_path, use_finetuned, model_name, pretrained,
+            device, save_after_load,
         )
         self._train_last_n_blocks = train_last_n_blocks
 
@@ -214,6 +230,7 @@ class CLIPEncoder:
     def _load(
         self,
         local_finetuned_path: Path,
+        use_finetuned:        bool,
         model_name:           str,
         pretrained:           str,
         device:               str,
@@ -241,11 +258,22 @@ class CLIPEncoder:
                 torch.save(model.state_dict(), str(base_path))
                 print(f"[CLIPEncoder] Base CLIP saved to {base_path}")
 
-        # If a fine-tuned checkpoint exists, overlay it
-        if local_finetuned_path.exists():
-            print(f"[CLIPEncoder] Applying fine-tuned weights from {local_finetuned_path}")
-            state = torch.load(str(local_finetuned_path), map_location="cpu")
-            model.load_state_dict(state)
+        # FIX: only overlay fine-tuned weights when explicitly requested.
+        # Previously the code always loaded fine-tuned weights if the file
+        # existed, silently corrupting Ablation A and B which need the frozen
+        # base model.
+        if use_finetuned:
+            if local_finetuned_path.exists():
+                print(f"[CLIPEncoder] Applying fine-tuned weights from {local_finetuned_path}")
+                state = torch.load(str(local_finetuned_path), map_location="cpu")
+                model.load_state_dict(state)
+            else:
+                raise FileNotFoundError(
+                    f"[CLIPEncoder] use_finetuned=True but checkpoint not found: "
+                    f"{local_finetuned_path}. Run run_finetune.py first."
+                )
+        else:
+            print("[CLIPEncoder] Using base (frozen) CLIP weights.")
 
         model = model.to(device).eval()
         tokenizer = open_clip.get_tokenizer(model_name)
@@ -268,9 +296,23 @@ class CLIPEncoder:
     def set_eval_mode(self) -> None:
         self._model.eval()
 
+    def trainable_parameters(self):
+        """
+        Return a generator of trainable parameters for the optimiser.
+
+        FIX: Previously returned a plain list, which breaks parameter-group
+        tricks in some optimisers and is inconsistent with nn.Module conventions.
+        Now returns a generator so it can be passed directly to AdamW as:
+            optimizer = AdamW(clip_enc.trainable_parameters(), ...)
+        """
+        return (p for p in self._model.parameters() if p.requires_grad)
+
     def parameters(self):
-        """Return only trainable parameters (used by the optimiser)."""
-        return [p for p in self._model.parameters() if p.requires_grad]
+        """
+        Alias kept for backwards-compatibility with any existing call sites.
+        Delegates to trainable_parameters().
+        """
+        return self.trainable_parameters()
 
     # ── embedding ─────────────────────────────────────────────────────────────
 
@@ -278,6 +320,10 @@ class CLIPEncoder:
     def encode_image(self, img: Image.Image) -> np.ndarray:
         """
         Encode a single PIL image → L2-normalised numpy vector (EMBEDDING_DIM,).
+
+        This method is for **inference only** — gradients are disabled via
+        @torch.no_grad().  During training use encode_image_train() instead,
+        which keeps the computation graph intact.
         """
         x = self._transform(img).unsqueeze(0).to(self.device)
         feat = self._model.encode_image(x)
