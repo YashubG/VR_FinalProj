@@ -41,6 +41,7 @@ from config import (
     TOP_K_VALUES,
     ALPHA,
     DEVICE,
+    SEEDS,
 )
 from models.captioner import BLIP2ITM
 
@@ -73,6 +74,7 @@ def parse_args():
                    help="Evaluate all per-seed checkpoints and report mean±std.")
     p.add_argument("--rebuild-index", action="store_true",
                    help="Rebuild HNSW index per seed during --multiseed-eval.")
+    p.add_argument("--seeds",type=int,nargs="+",default=None help="Subset of seeds to evaluate (e.g. --seeds 95 116)")
     return p.parse_args()
 
 
@@ -300,8 +302,31 @@ def _run_multiseed_eval(args, query_records, gallery_records, root, detector):
     from config import MODELS_DIR
 
     # ── Discover per-seed checkpoints produced by run_finetune.py ────────────
+    # pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
+    # ckpt_files = sorted(glob.glob(pattern))
+    
+    # Allow specific seeds to run only. 
     pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
-    ckpt_files = sorted(glob.glob(pattern))
+    all_ckpt_files = sorted(glob.glob(pattern))
+
+    # Filter by --seeds if provided
+    if args.seeds is not None:
+        requested = set(args.seeds)
+
+        ckpt_files = []
+        for path in all_ckpt_files:
+            path_obj = Path(path)
+
+            # clip_finetuned_seed_95.pt -> 95
+            try:
+                seed = int(path_obj.stem.split("_")[-1])
+            except ValueError:
+                continue
+
+            if seed in requested:
+                ckpt_files.append(path)
+    else:
+        ckpt_files = all_ckpt_files
     if not ckpt_files:
         print(f"ERROR: No per-seed checkpoints found matching {pattern}")
         print("Run: python run_finetune.py --multiseed")
