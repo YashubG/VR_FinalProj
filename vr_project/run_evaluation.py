@@ -74,7 +74,7 @@ def parse_args():
                    help="Evaluate all per-seed checkpoints and report mean±std.")
     p.add_argument("--rebuild-index", action="store_true",
                    help="Rebuild HNSW index per seed during --multiseed-eval.")
-    p.add_argument("--seeds",type=int,nargs="+",default=None help="Subset of seeds to evaluate (e.g. --seeds 95 116)")
+    p.add_argument("--seeds",type=int,nargs="+",default=None,help="Subset of seeds to evaluate (e.g. --seeds 95 116)")
     return p.parse_args()
 
 
@@ -304,7 +304,7 @@ def _run_multiseed_eval(args, query_records, gallery_records, root, detector):
     # ── Discover per-seed checkpoints produced by run_finetune.py ────────────
     # pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
     # ckpt_files = sorted(glob.glob(pattern))
-    
+
     # Allow specific seeds to run only. 
     pattern = str(MODELS_DIR / "clip_finetuned_seed_*.pt")
     all_ckpt_files = sorted(glob.glob(pattern))
