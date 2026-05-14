@@ -58,17 +58,20 @@ from utils.image_utils import load_image
 # ─────────────────────────────────────────────────────────────────────────────
 # Build ground-truth relevant sets
 # ─────────────────────────────────────────────────────────────────────────────
-
-def build_relevant_sets(query_records, gallery_records):
+def build_relevant_sets(query_records, gallery_records) -> Dict[str, Set[str]]:
+    # 1. Pre-compute all valid gallery item IDs into a set. 
+    # This takes O(G) time and allows O(1) membership lookups later.
+    valid_gallery_ids = {gid for _, gid in gallery_records}
+    
     relevant: Dict[str, Set[str]] = {}
-    gallery_by_id: Dict[str, Set[str]] = {}
-    for gpath, gid in gallery_records:
-        gallery_by_id.setdefault(gid, set()).add(gid)
+    
+    # 2. Iterate through queries. This takes O(Q) time.
     for qpath, qid in query_records:
-        # Store the item_id itself (matched against retrieved item_ids)
-        gallery_items_by_id = {gid: {gid} for _, gid in gallery_records}  # one pass
-        relevant[qpath] = gallery_items_by_id.get(qid, set()) 
-        # relevant[qpath] = {gid for _, gid in gallery_records if gid == qid}   # all gallery images share item_id qid
+        if qid in valid_gallery_ids:
+            relevant[qpath] = {qid}
+        else:
+            relevant[qpath] = set()
+            
     return relevant
 
 
