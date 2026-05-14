@@ -66,7 +66,9 @@ def build_relevant_sets(query_records, gallery_records):
         gallery_by_id.setdefault(gid, set()).add(gid)
     for qpath, qid in query_records:
         # Store the item_id itself (matched against retrieved item_ids)
-        relevant[qpath] = {gid for _, gid in gallery_records if gid == qid}   # all gallery images share item_id qid
+        gallery_items_by_id = {gid: {gid} for _, gid in gallery_records}  # one pass
+        relevant[qpath] = gallery_items_by_id.get(qid, set()) 
+        # relevant[qpath] = {gid for _, gid in gallery_records if gid == qid}   # all gallery images share item_id qid
     return relevant
 
 
