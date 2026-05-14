@@ -124,10 +124,18 @@ class CaptionCache:
 
     def flush(self) -> None:
         """Write current state to disk."""
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(str(self.cache_path), "wb") as f:
-            pickle.dump(self._store, f)
-        self._dirty_since_flush = 0
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(str(self.cache_path), "wb") as f:
+                pickle.dump(self._store, f)
+            self._dirty_since_flush = 0
+            return True
+        except (OSError, IOError, pickle.PickleError) as e:
+            # We catch specific IO/Pickle errors, but Exception is fine too 
+            # if you want a total safety net.
+            print(f"\n[CaptionCache] ERROR: Failed to write cache to {self.cache_path}.")
+            print(f"Reason: {e}")
+            print("Pipeline will continue using in-memory state, but progress is NOT being saved to disk.")
 
     # ── public API ────────────────────────────────────────────────────────────
 
