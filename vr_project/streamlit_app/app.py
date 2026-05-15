@@ -182,9 +182,6 @@ def inject_styles() -> None:
     )
 
 
-inject_styles()
-
-
 @st.cache_resource(show_spinner="Loading YOLO detector...")
 def load_detector():
     from models.detector import YOLODetector
@@ -193,10 +190,19 @@ def load_detector():
 
 
 @st.cache_resource(show_spinner="Loading CLIP encoder...")
-def load_clip(alpha: float):
+def load_clip(alpha: float, use_finetuned: bool, checkpoint_path: Path | None = None):
     from models.clip_encoder import CLIPEncoder
 
-    return CLIPEncoder(alpha=alpha)
+    if use_finetuned:
+        if checkpoint_path is None:
+            from config import CLIP_LOCAL_PATH
+
+            checkpoint_path = CLIP_LOCAL_PATH
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Fine-tuned CLIP checkpoint not found: {checkpoint_path}")
+        return CLIPEncoder(alpha=alpha, use_finetuned=True, local_finetuned_path=checkpoint_path)
+
+    return CLIPEncoder(alpha=alpha, use_finetuned=False)
 
 
 @st.cache_resource(show_spinner="Loading BLIP-2 ITM scorer...")
@@ -214,6 +220,98 @@ def load_index(tag: str):
     idx_path = EMBEDDINGS_DIR / f"{tag}_hnsw.bin"
     meta_path = EMBEDDINGS_DIR / f"{tag}_metadata.pkl"
     return HNSWIndex.load(idx_path, meta_path)
+
+
+def parse_ablation_name(filename: str) -> tuple[str, float, int | None]:
+    """
+    Parse ablation filename to extract:
+      - ablation type (A, B, C, ...)
+      - alpha value (e.g., 0.6 from '_a06')
+      - seed (e.g., 116 from '_seed_116')
+    
+    Examples:
+      ablation_A_hnsw.bin -> ("A", 1.0, None)
+      ablation_B_a06_hnsw.bin -> ("B", 0.6, None)
+      ablation_C_a06_seed_116_hnsw.bin -> ("C", 0.6, 116)
+    """
+    base = filename.replace("_hnsw.bin", "").replace("_metadata.pkl", "")
+    parts = base.split("_")
+    
+    if not parts[0] == "ablation" or len(parts) < 2:
+        return None
+    
+    ablation_type = parts[1]  # A, B, C, ...
+    alpha = 1.0
+    seed = None
+    
+    for i, part in enumerate(parts[2:], start=2):
+        if part.startswith("a") and len(part) >= 3:
+            # _a06 -> 0.6, _a08 -> 0.8
+            try:
+                digits = part[1:]  # Remove 'a' prefix
+                alpha = int(digits) / 10.0  # Two digits: 06 -> 0.6, 08 -> 0.8
+            except ValueError:
+                pass
+        elif part == "seed" and len(parts) > i + 1:
+            try:
+                seed = int(parts[i + 1])
+            except (ValueError, IndexError):
+                pass
+    
+    return (ablation_type, alpha, seed)
+
+
+def get_available_ablations() -> list[tuple[str, float, int | None, str]]:
+    """
+    Scan embeddings folder for available ablations.
+    Returns list of (ablation_name, alpha, seed, display_name)
+    """
+    from config import EMBEDDINGS_DIR
+    
+    ablations = {}
+    
+    if not EMBEDDINGS_DIR.exists():
+        return []
+    
+    for f in EMBEDDINGS_DIR.glob("ablation_*_hnsw.bin"):
+        parsed = parse_ablation_name(f.name)
+        if parsed:
+            abl_type, alpha, seed = parsed
+            key = (abl_type, alpha, seed)
+            if key not in ablations:
+                # Build display name
+                seed_str = f" (seed {seed})" if seed else ""
+                ablations[key] = f"Ablation {abl_type} | α={alpha:.2f}{seed_str}"
+    
+    return sorted(ablations.items(), key=lambda x: (x[0][0], x[0][1], x[0][2] or 0))
+
+
+def get_ablation_settings(abl_type: str, alpha: float) -> dict:
+    """Infer model settings based on ablation type and alpha."""
+    if abl_type == "A":
+        return {
+            "use_finetuned": False,
+            "use_rerank": False,
+            "caption": "Vision-only CLIP baseline (no text, no ITM)",
+        }
+    if abl_type == "B":
+        return {
+            "use_finetuned": False,
+            "use_rerank": True,
+            "caption": "Frozen CLIP + frozen BLIP-2 (caption fusion enabled)",
+        }
+    if abl_type == "C":
+        return {
+            "use_finetuned": True,
+            "use_rerank": True,
+            "caption": "Fine-tuned CLIP + frozen BLIP-2 (best-performing demo mode)",
+        }
+    # Default fallback
+    return {
+        "use_finetuned": False,
+        "use_rerank": False,
+        "caption": f"Ablation {abl_type} (default settings)",
+    }
 
 
 def display_result_card(result: dict, rank: int, root: Path) -> None:
@@ -242,10 +340,7 @@ def display_result_card(result: dict, rank: int, root: Path) -> None:
             else:
                 st.metric("ITM", "--")
 
-        caption = result.get("caption", "")
-        if caption:
-            with st.expander("Caption"):
-                st.write(caption)
+        # Caption removed: only show Cosine and ITM per design
 
 
 def make_body_variant(img: Image.Image, mode: str) -> Image.Image:
@@ -328,256 +423,321 @@ def manual_adjustment_widget(base_img: Image.Image) -> Image.Image:
     return adjusted
 
 
-with st.sidebar:
-    st.markdown('<div class="panel-title">Search configuration</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">Tuning controls</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="panel-subtle">Use the default tag for the main demo index, or switch to another tag if you built a different ablation index.</div>',
-        unsafe_allow_html=True,
-    )
+def main():
+    with st.sidebar:
+        st.markdown('<div class="panel-title">Search configuration</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">Ablation selection</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="panel-subtle">The app auto-detects available ablations from the embeddings folder. Select one to lock the matching settings.</div>',
+            unsafe_allow_html=True,
+        )
 
-    index_tag = st.text_input("Index tag", value="gallery", help="Must match run_indexing.py")
-    alpha = st.slider("Fusion alpha (image weight)", 0.0, 1.0, 0.6, 0.05)
-    top_k = st.slider("Top-K results", 1, 30, DEFAULT_TOP_K)
-    use_rerank = st.checkbox("Use BLIP-2 reranking", value=False)
-    padding = st.slider("YOLO crop padding", 0.0, 0.3, 0.05, 0.01)
+        # Auto-detect available ablations
+        available = get_available_ablations()
+        if not available:
+            st.error("No ablations found in embeddings/ folder. Run run_indexing.py first.")
+            st.stop()
 
-    st.markdown("---")
-    root_str = st.text_input("Dataset root", value=str(DATASET_DIR))
-    st.markdown(
-        '<div class="panel-subtle">Recommended run order:<br>1. build index<br>2. fine-tune CLIP if needed<br>3. launch Streamlit</div>',
-        unsafe_allow_html=True,
-    )
+        # Build dropdown options
+        options_dict = {display: (abl_type, alpha, seed) for (abl_type, alpha, seed), display in available}
+        selected_display = st.selectbox(
+            "Available ablations",
+            list(options_dict.keys()),
+            label_visibility="collapsed",
+            help="Auto-detected from embeddings folder filenames"
+        )
+        
+        abl_type, alpha, seed = options_dict[selected_display]
+        settings = get_ablation_settings(abl_type, alpha)
+        
+        # Build index tag using the filename convention from embeddings/.
+        # Examples: alpha=0.6 -> _a06, alpha=0.8 -> _a08, alpha=1.0 -> no suffix.
+        seed_str = f"_seed_{seed}" if seed else ""
+        alpha_str = f"_a{int(round(alpha * 10)):02d}" if alpha != 1.0 else ""
+        index_tag = f"ablation_{abl_type}{alpha_str}{seed_str}"
 
-root = Path(root_str)
+        # Advanced overrides (collapsed by default)
+        with st.expander("Advanced overrides (expert mode)"):
+            st.markdown('<div class="panel-subtle">Only change these if you understand the ablations.</div>', unsafe_allow_html=True)
+            override_index = st.text_input("Override index tag", value=index_tag, help="Leave blank to use auto-detected tag")
+            index_tag = override_index if override_index.strip() else index_tag
+            
+            override_alpha = st.checkbox("Override alpha", value=False)
+            if override_alpha and settings["use_finetuned"]:
+                alpha = st.slider("Fusion alpha (image weight)", 0.0, 1.0, alpha, 0.05)
+            elif not override_alpha:
+                st.slider("Fusion alpha (image weight)", 0.0, 1.0, alpha, 0.05, disabled=True)
+
+        top_k = st.slider("Top-K results", 1, 30, DEFAULT_TOP_K)
+        padding = st.slider("YOLO crop padding", 0.0, 0.3, 0.05, 0.01)
+
+        st.markdown("---")
+        root_str = st.text_input("Dataset root", value=str(DATASET_DIR))
+        st.markdown(
+            f'<div class="panel-subtle"><strong>{settings["caption"]}</strong><br>✓ Index: <code>{index_tag}</code><br>✓ α = {alpha:.2f}<br>✓ ITM reranking: {"enabled" if settings["use_rerank"] else "disabled"}</div>',
+            unsafe_allow_html=True,
+        )
+
+    root = Path(root_str)
+    use_rerank = settings["use_rerank"]
+    use_finetuned = settings["use_finetuned"]
 
 
-st.markdown(
-    """
-    <div class="hero">
-        <h1>Visual Product Search Studio</h1>
-        <p>
-            Upload a person image, let YOLO isolate the garment region, choose
-            full body, upper body, or lower body search scope, optionally fine-tune
-            the crop with a drag box, and then search the catalogue.
-        </p>
-        <div class="pill-row">
-            <span class="pill">YOLO crop</span>
-            <span class="pill">Manual drag crop</span>
-            <span class="pill">Upper / lower / full body</span>
-            <span class="pill">CLIP + HNSW retrieval</span>
-            <span class="pill">Optional BLIP-2 rerank</span>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-st.markdown(
-    '<div class="panel"><div class="panel-title">Input studio</div><div class="panel-heading">Upload a person image</div><div class="panel-subtle">The app will detect the clothing region, let you choose the search scope, and show a final crop before retrieval.</div></div>',
-    unsafe_allow_html=True,
-)
-
-uploaded = st.file_uploader(
-    "Drop a clothing image here",
-    type=["jpg", "jpeg", "png", "webp"],
-    label_visibility="collapsed",
-)
-
-if uploaded is None:
-    st.info("Upload an image to start the retrieval pipeline.")
     st.markdown(
         """
-        <div class="panel">
-            <div class="panel-title">How it works</div>
-            <div class="panel-subtle">
-                1. YOLO finds the garment region.<br>
-                2. Pick full, upper, or lower body search.<br>
-                3. Optionally drag the crop manually.<br>
-                4. Confirm the crop and run retrieval.<br>
+        <div class="hero">
+            <h1>Visual Product Search Studio</h1>
+            <p>
+                Upload a person image, let YOLO isolate the garment region, choose
+                full body, upper body, or lower body search scope, optionally refine
+                the crop, confirm it, and then search the catalogue.
+            </p>
+            <div class="pill-row">
+                <span class="pill">YOLO crop</span>
+                <span class="pill">Manual drag crop</span>
+                <span class="pill">Upper / lower / full body</span>
+                <span class="pill">CLIP + HNSW retrieval</span>
+                <span class="pill">Ablation-aware demo</span>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    st.stop()
 
-query_img = Image.open(uploaded).convert("RGB")
+    st.markdown("<br>", unsafe_allow_html=True)
 
-# Original image preview (stacked vertically)
-with st.container(border=True):
-    st.markdown('<div class="panel-title">Preview</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">Original image</div>', unsafe_allow_html=True)
-    st.image(resize_for_display(query_img, 300), use_container_width=True)
+    st.markdown(
+        '<div class="panel"><div class="panel-title">Input studio</div><div class="panel-heading">Upload a person image</div><div class="panel-subtle">The app will detect the clothing region, let you choose the search scope, and show a final crop before retrieval.</div></div>',
+        unsafe_allow_html=True,
+    )
 
-st.markdown("<br>", unsafe_allow_html=True)
-
-# YOLO detection (Step 1)
-with st.container(border=True):
-    st.markdown('<div class="panel-title">Step 1</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">YOLO detection</div>', unsafe_allow_html=True)
-
-    with st.spinner("Running YOLO detection..."):
-        detector = load_detector()
-        all_crops = detector.crop_all(query_img, padding=padding)
-
-    detection_count = len(all_crops)
-    if detection_count == 0:
-        st.warning("No product region was detected, so the full image will be used as the base crop.")
-        selected_detection = query_img
-        selected_conf = None
-    else:
-        labels = [f"Region {i+1} | conf {conf:.2f}" for i, (_, _, conf) in enumerate(all_crops)]
-        selected_label = st.selectbox("Detected regions", labels, index=0)
-        selected_idx = labels.index(selected_label)
-        selected_detection, _, selected_conf = all_crops[selected_idx]
-
-    summary_cols = st.columns(3)
-    with summary_cols[0]:
-        st.metric("Detections", detection_count)
-    with summary_cols[1]:
-        st.metric("Padding", f"{padding:.2f}")
-    with summary_cols[2]:
-        st.metric("Mode", "Ready")
-
-    if selected_conf is not None:
-        st.caption(f"Selected detection confidence: {selected_conf:.2f}")
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# Choose search target (Step 2)
-with st.container(border=True):
-    st.markdown('<div class="panel-title">Step 2</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">Choose search target</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-subtle">This controls whether the search is aimed at the full outfit, the upper garment region, or the lower garment region.</div>', unsafe_allow_html=True)
-    target_mode = st.radio(
-        "Search for",
-        ["Full body", "Upper body", "Lower body"],
-        horizontal=True,
-        index=0,
+    uploaded = st.file_uploader(
+        "Drop a clothing image here",
+        type=["jpg", "jpeg", "png", "webp"],
         label_visibility="collapsed",
     )
 
-    base_crop = make_body_variant(selected_detection, target_mode)
-    st.image(resize_for_display(base_crop, 300), use_container_width=True)
-    st.markdown(
-        f'<div class="panel-subtle">Preview crop: <strong>{target_mode}</strong> search scope.</div>',
-        unsafe_allow_html=True,
-    )
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# Manual crop refinement (Step 3)
-with st.container(border=True):
-    st.markdown('<div class="panel-title">Step 3</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">Manual crop refinement</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-subtle">If the auto crop is not perfect, refine it with drag and resize controls like a phone screenshot editor.</div>', unsafe_allow_html=True)
-    crop_preview = manual_adjustment_widget(base_crop)
-
-    force_full = st.checkbox("Ignore crop and use the full uploaded image", value=False)
-    final_crop = query_img if force_full else crop_preview
-
-    st.markdown(
-        f'<div class="panel-subtle">Final search image will use <strong>{"full image" if force_full else "selected crop"}</strong>.</div>',
-        unsafe_allow_html=True,
-    )
-    st.image(resize_for_display(final_crop, 300), use_container_width=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# Confirm and search (Step 4)
-with st.container(border=True):
-    st.markdown('<div class="panel-title">Step 4</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">Confirm and search</div>', unsafe_allow_html=True)
-    search_now = st.button("Run retrieval", type="primary", use_container_width=True)
-
-if not search_now:
-    st.markdown(
-        '<div class="panel"><div class="panel-subtle">Adjust the crop, choose the garment region, and press <strong>Run retrieval</strong> when ready.</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.stop()
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-with st.container(border=True):
-    st.markdown('<div class="panel-title">Retrieval engine</div>', unsafe_allow_html=True)
-    st.markdown('<div class="panel-heading">Loading index and encoders</div>', unsafe_allow_html=True)
-
-    index = load_index(index_tag)
-    if index is None:
-        st.error(
-            f"Index '{index_tag}' was not found in embeddings/. Build it first using run_indexing.py."
+    if uploaded is None:
+        st.info("Upload an image to start the retrieval pipeline.")
+        st.markdown(
+            """
+            <div class="panel">
+                <div class="panel-title">How it works</div>
+                <div class="panel-subtle">
+                    1. YOLO finds the garment region.<br>
+                    2. Choose full / upper / lower body scope.<br>
+                    3. Optionally refine the crop manually.<br>
+                    4. Confirm the crop before retrieval.<br>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
         st.stop()
 
-    st.success(f"Index loaded with {len(index):,} vectors.")
+    query_img = Image.open(uploaded).convert("RGB")
 
-    clip_enc = load_clip(alpha)
-    with st.spinner("Encoding query crop with CLIP..."):
-        query_emb = clip_enc.encode_image(final_crop)
+    # Original image preview (stacked vertically)
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">Preview</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">Original image</div>', unsafe_allow_html=True)
+        st.image(resize_for_display(query_img, 300), use_container_width=True)
 
-    with st.spinner(f"Searching HNSW (top-{top_k})..."):
-        rerank_k = top_k * 5
-        candidates = index.search(query_emb, top_k=rerank_k if use_rerank else top_k)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    if use_rerank and candidates:
-        with st.spinner("BLIP-2 ITM reranking..."):
-            itm_scorer = load_itm_scorer()
-            captions   = [c["caption"] for c in candidates]
-            itm_scores = itm_scorer.itm_scores_batch(final_crop, captions)
-            for cand, itm in zip(candidates, itm_scores):
-                cand["itm_score"]   = itm
-                cand["final_score"] = 0.5 * cand["score"] + 0.5 * itm
-            candidates.sort(key=lambda x: x["final_score"], reverse=True)
-            candidates = candidates[:top_k]
+    # YOLO detection (Step 1)
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">Step 1</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">YOLO detection</div>', unsafe_allow_html=True)
 
+        with st.spinner("Running YOLO detection..."):
+            detector = load_detector()
+            all_crops = detector.crop_all(query_img, padding=padding)
 
-st.markdown("<br>", unsafe_allow_html=True)
-st.markdown('<div class="panel-title">Results gallery</div>', unsafe_allow_html=True)
-st.markdown('<div class="panel-heading">Top retrieved products</div>', unsafe_allow_html=True)
+        detection_count = len(all_crops)
+        if detection_count == 0:
+            st.warning("No product region was detected, so the full image will be used as the base crop.")
+            selected_detection = query_img
+            selected_conf = None
+        else:
+            labels = [f"Region {i+1} | conf {conf:.2f}" for i, (_, _, conf) in enumerate(all_crops)]
+            selected_label = st.selectbox("Detected regions", labels, index=0)
+            selected_idx = labels.index(selected_label)
+            selected_detection, _, selected_conf = all_crops[selected_idx]
 
-if not candidates:
-    st.warning("No retrieval candidates were returned.")
-    st.stop()
+        summary_cols = st.columns(3)
+        with summary_cols[0]:
+            st.metric("Detections", detection_count)
+        with summary_cols[1]:
+            st.metric("Padding", f"{padding:.2f}")
+        with summary_cols[2]:
+            st.metric("Mode", "Ready")
 
-st.markdown(
-    f'<div class="panel-subtle">Showing top {min(top_k, len(candidates))} matches for <strong>{target_mode}</strong> search.</div>',
-    unsafe_allow_html=True,
-)
+        if selected_conf is not None:
+            st.caption(f"Selected detection confidence: {selected_conf:.2f}")
 
-grid_cols = 3
-for start in range(0, min(top_k, len(candidates)), grid_cols):
-    cols = st.columns(grid_cols, gap="large")
-    for offset, col in enumerate(cols):
-        idx = start + offset
-        if idx >= min(top_k, len(candidates)):
-            continue
-        with col:
-            display_result_card(candidates[idx], rank=idx + 1, root=root)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-with st.expander("Raw result data"):
-    import pandas as pd
-
-    rows: List[dict] = []
-    for i, r in enumerate(candidates[:top_k]):
-        rows.append(
-            {
-                "Rank": i + 1,
-                "Item ID": r.get("item_id", ""),
-                "Path": r.get("path", ""),
-                "Cosine": f"{r.get('score', 0):.4f}",
-                "ITM": f"{r.get('itm_score', ''):.4f}" if "itm_score" in r else "—",
-                "Final": f"{r.get('final_score', r.get('score', 0)):.4f}",
-                "Caption": (r.get("caption", "")[:60] + "...") if r.get("caption") else "",
-            }
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">Step 2</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">Choose search scope</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-subtle">Pick the garment region to search: full body, upper body, or lower body. This mirrors the search-scope step in the PDF.</div>', unsafe_allow_html=True)
+        target_mode = st.radio(
+            "Search scope",
+            ["Full body", "Upper body", "Lower body"],
+            horizontal=True,
+            index=0,
+            label_visibility="collapsed",
         )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-st.markdown("---")
-st.markdown(
-    '<div class="footer-note">Visual Product Search Studio · DeepFashion In-Shop Clothes Retrieval</div>',
-    unsafe_allow_html=True,
-)
+        base_crop = make_body_variant(selected_detection, target_mode)
+        st.image(resize_for_display(base_crop, 300), use_container_width=True)
+        st.markdown(
+            f'<div class="panel-subtle">Preview crop: <strong>{target_mode}</strong> search scope.</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">Step 3</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">Manual crop refinement</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-subtle">Refine the chosen scope only if needed, then confirm the crop before search.</div>', unsafe_allow_html=True)
+        crop_preview = manual_adjustment_widget(base_crop)
+        st.image(resize_for_display(crop_preview, 300), use_container_width=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">Step 4</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">Confirm crop</div>', unsafe_allow_html=True)
+        confirm_cols = st.columns(2)
+        with confirm_cols[0]:
+            confirm_crop = st.button("Confirm crop", type="primary", use_container_width=True)
+        with confirm_cols[1]:
+            recrop = st.button("Re-crop", use_container_width=True)
+
+        if recrop:
+            st.warning("Crop adjustment requested. Change the crop or search scope, then confirm again.")
+            st.stop()
+
+        if not confirm_crop:
+            st.info("Confirm the crop to continue to retrieval.")
+            st.stop()
+
+        final_crop = crop_preview
+        st.markdown(
+            f'<div class="panel-subtle">Confirmed search image uses <strong>{target_mode}</strong> scope with the selected crop.</div>',
+            unsafe_allow_html=True,
+        )
+        st.image(resize_for_display(final_crop, 300), use_container_width=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Retrieval only happens after the crop has been confirmed.
+    with st.container(border=True):
+        st.markdown('<div class="panel-title">Retrieval engine</div>', unsafe_allow_html=True)
+        st.markdown('<div class="panel-heading">Loading index and encoders</div>', unsafe_allow_html=True)
+
+        index = load_index(index_tag)
+        if index is None:
+            st.error(
+                f"Index '{index_tag}' was not found in embeddings/. Build it first using run_indexing.py."
+            )
+            st.stop()
+
+        st.success(f"Index loaded with {len(index):,} vectors.")
+
+        # Load CLIP with potential seed-specific checkpoint
+        checkpoint_path = None
+        if use_finetuned and seed:
+            from config import MODELS_DIR
+            seed_checkpoint = MODELS_DIR / f"clip_seed_{seed}.pt"
+            if seed_checkpoint.exists():
+                checkpoint_path = seed_checkpoint
+                st.info(f"Using seed-{seed} CLIP checkpoint")
+        
+        clip_enc = load_clip(alpha, use_finetuned, checkpoint_path)
+        with st.spinner("Encoding query crop with CLIP..."):
+            query_emb = clip_enc.encode_image(final_crop)
+
+        with st.spinner(f"Searching HNSW (top-{top_k})..."):
+            rerank_k = top_k * 5
+            candidates = index.search(query_emb, top_k=rerank_k if use_rerank else top_k)
+
+        if use_rerank and candidates:
+            with st.spinner("BLIP-2 ITM reranking..."):
+                itm_scorer = load_itm_scorer()
+                captions   = [c["caption"] for c in candidates]
+                itm_scores = itm_scorer.itm_scores_batch(final_crop, captions)
+                for cand, itm in zip(candidates, itm_scores):
+                    cand["itm_score"]   = itm
+                    cand["final_score"] = 0.5 * cand["score"] + 0.5 * itm
+                candidates.sort(key=lambda x: x["final_score"], reverse=True)
+                candidates = candidates[:top_k]
+
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<div class="panel-title">Results gallery</div>', unsafe_allow_html=True)
+    st.markdown('<div class="panel-heading">Top retrieved products</div>', unsafe_allow_html=True)
+
+    if not candidates:
+        st.warning("No retrieval candidates were returned.")
+        st.stop()
+
+    st.markdown(
+        f'<div class="panel-subtle">Showing top {min(top_k, len(candidates))} matches for selected search.</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Only compute ITM when the selected ablation uses BLIP-2 reranking.
+    need_itm = use_rerank and any("itm_score" not in c for c in candidates[:top_k])
+    if need_itm and candidates:
+        try:
+            with st.spinner("Computing ITM scores for display..."):
+                itm_scorer = load_itm_scorer()
+                captions = [c.get("caption", "") for c in candidates[:top_k]]
+                itm_scores = itm_scorer.itm_scores_batch(final_crop, captions)
+                for c, s in zip(candidates[:top_k], itm_scores):
+                    c["itm_score"] = s
+        except Exception as exc:
+            st.warning(f"ITM scorer unavailable or failed: {exc}")
+
+    grid_cols = 3
+    for start in range(0, min(top_k, len(candidates)), grid_cols):
+        cols = st.columns(grid_cols, gap="large")
+        for offset, col in enumerate(cols):
+            idx = start + offset
+            if idx >= min(top_k, len(candidates)):
+                continue
+            with col:
+                display_result_card(candidates[idx], rank=idx + 1, root=root)
+
+    with st.expander("Raw result data"):
+        import pandas as pd
+
+        rows: List[dict] = []
+        for i, r in enumerate(candidates[:top_k]):
+            rows.append(
+                {
+                    "Rank": i + 1,
+                    "Item ID": r.get("item_id", ""),
+                    "Path": r.get("path", ""),
+                    "Cosine": f"{r.get('score', 0):.4f}",
+                    "ITM": f"{r.get('itm_score', ''):.4f}" if "itm_score" in r else "—",
+                    "Final": f"{r.get('final_score', r.get('score', 0)):.4f}",
+                    # Caption removed from raw table — UI presents Cosine and ITM only
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    st.markdown("---")
+    st.markdown(
+        '<div class="footer-note">Visual Product Search Studio · DeepFashion In-Shop Clothes Retrieval</div>',
+        unsafe_allow_html=True,
+    )
+
+
+if __name__ == "__main__":
+    inject_styles()
+    main()
