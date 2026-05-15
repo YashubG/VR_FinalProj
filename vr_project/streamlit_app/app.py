@@ -652,7 +652,7 @@ def main():
         checkpoint_path = None
         if use_finetuned and seed:
             from config import MODELS_DIR
-            seed_checkpoint = MODELS_DIR / f"clip_seed_{seed}.pt"
+            seed_checkpoint = MODELS_DIR / f"clip_finetuned_seed_{seed}.pt"
             if seed_checkpoint.exists():
                 checkpoint_path = seed_checkpoint
                 st.info(f"Using seed-{seed} CLIP checkpoint")
